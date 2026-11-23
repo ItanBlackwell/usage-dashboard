@@ -7,6 +7,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -49,7 +50,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p 'require("./package.json").version')
-          test "$GITHUB_REF_NAME" = "v$VERSION"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            test "$GITHUB_REF_NAME" = "v$VERSION"
+          fi
       - name: Build and validate
         run: |
           set -e
@@ -66,11 +69,12 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p 'require("./package.json").version')
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "Release tag already exists. Refusing to replace published assets."
-            exit 1
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG is already published. No changes were made."
+            exit 0
           fi
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$TAG" \
             "release/Usage-Dashboard-Portable-${VERSION}.zip" \
             "release/Usage-Dashboard-Source-${VERSION}.zip" \
             "release/SHA256SUMS.txt" \
