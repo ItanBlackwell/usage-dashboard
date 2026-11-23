@@ -1,0 +1,73 @@
+# Usage Dashboard
+# Copyright (c) 2026 ItanBlackwell.
+# SPDX-License-Identifier: MPL-2.0
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Static syntax and build checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in src/*.cjs browser-extension/*.js build.cjs; do node --check "$file"; done
+          node build.cjs
+          node --check dist/gui-experimental.cjs
+          node -e 'const p=require("./package.json");if(p.name!=="usage-dashboard"||!p.exports?.["./gui-experimental"])process.exit(1)'
+      - name: Package and verify archives without test scripts or secrets
+        shell: bash
+        run: |
+          python3 tools/make-distributions.py
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json, zipfile
+          version=json.loads(Path('package.json').read_text())['version']
+          for kind in ('Portable','Source'):
+              path=Path('release')/f'Usage-Dashboard-{kind}-{version}.zip'
+              assert path.is_file(), path
+              with zipfile.ZipFile(path) as z:
+                  assert z.testzip() is None
+                  names=z.namelist()
+                  assert names and not any('/tests/' in '/'+name or name.endswith('Test-UsageDashboard.ps1') for name in names)
+                  assert not any(name.endswith(('pairing.json','settings.json','.env')) for name in names)
+          PYCODE
+
+  windows-installer-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse Windows PowerShell scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem installer -Filter *.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw "Invalid PowerShell: $($_.Name): $($errors -join '; ')" }
+          }
+      - name: Clean-room installation and removal smoke check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:OPENCODE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'usage-dashboard-smoke'
+          & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path
+          if (-not $?) { throw 'Installer failed' }
+          $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
+          if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing after installation' }
+          & ./installer/Uninstall-UsageDashboard.ps1 -PurgeCachedData
+          if (-not $?) { throw 'Uninstaller failed' }
+          if (Test-Path $target) { throw 'Plugin still installed' }

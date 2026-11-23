@@ -1,0 +1,4 @@
+Usage Dashboard browser companion
+Copyright (c) 2026 ItanBlackwell.
+See repository root LICENSE and NOTICE.
+https://github.com/ItanBlackwell/usage-dashboard

@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible problem without sharing credentials.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "**Never paste API keys, access tokens, email addresses or private billing data.**"
+  - type: input
+    id: version
+    attributes:
+      label: Usage Dashboard version
+      placeholder: 0.13.0
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: OpenCode Desktop version
+    validations:
+      required: true
+  - type: dropdown
+    id: layout
+    attributes:
+      label: Interface layout
+      options: [Side tabs, Inbox, Top tabs, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

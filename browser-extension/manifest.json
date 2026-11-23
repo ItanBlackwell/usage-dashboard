@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Usage Dashboard · OpenAI Billing",
+  "version": "0.13.0",
+  "description": "Read only the visible OpenAI API prepaid balance and deliver its amount to the local OpenCode plugin.",
+  "permissions": [
+    "alarms",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://platform.openai.com/settings/organization/billing/*",
+    "http://127.0.0.1:18746/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://platform.openai.com/settings/organization/billing/overview*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "homepage_url": "https://github.com/ItanBlackwell/usage-dashboard"
+}

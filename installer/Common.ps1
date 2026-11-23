@@ -1,0 +1,59 @@
+# Usage Dashboard
+# Copyright (c) 2026 ItanBlackwell.
+# SPDX-License-Identifier: MPL-2.0
+# Source: https://github.com/ItanBlackwell/usage-dashboard
+# Internal helper for installation and uninstallation. No third-party dependencies.
+Set-StrictMode -Version Latest
+function Get-OpenCodeRoot {
+    if ($env:OPENCODE_CONFIG_DIR -and [System.IO.Path]::IsPathRooted($env:OPENCODE_CONFIG_DIR)) {
+        return [System.IO.Path]::GetFullPath($env:OPENCODE_CONFIG_DIR)
+    }
+    return (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.config\opencode')
+}
+function Remove-DuplicatePluginReferences {
+    param([string]$ConfigRoot)
+    $targets = @(
+        ((Join-Path $ConfigRoot 'plugins\pv-usage-dashboard').Replace('\','/')).TrimEnd('/'),
+        ((Join-Path $ConfigRoot 'plugins\usage-dashboard').Replace('\','/')).TrimEnd('/')
+    )
+    foreach ($name in @('opencode.jsonc','opencode.json')) {
+        $file = Join-Path $ConfigRoot $name
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        $raw = [System.IO.File]::ReadAllText($file)
+        $match = [regex]::Match($raw, '(?s)"plugins"\s*:\s*\[(?<items>[^\[\]]*)\]')
+        if (-not $match.Success) { continue }
+        $items = $match.Groups['items']
+        $tokens = [regex]::Matches($items.Value, '"(?:\\.|[^"\\])*"')
+        $remainder = [regex]::Replace($items.Value, '"(?:\\.|[^"\\])*"', '')
+        # A complex plugin list may contain comments or objects. Never rewrite it blindly.
+        if ($remainder -notmatch '^[\s,]*$') {
+            Write-Warning "Skipped automatic cleanup of complex plugin array: $file"
+            continue
+        }
+        $kept = [System.Collections.Generic.List[string]]::new()
+        $removed = 0
+        foreach ($token in $tokens) {
+            try { $value = ConvertFrom-Json -InputObject $token.Value -ErrorAction Stop }
+            catch { $kept.Add($token.Value); continue }
+            $normalized = ([string]$value).Replace('\','/').TrimEnd('/')
+            if ($normalized -match '^file:///' ) { $normalized = $normalized.Substring(8) }
+            $legacyName = $normalized -ieq 'pv-usage-dashboard'
+            $ours = @($targets | Where-Object { $normalized -ieq $_ })
+            if ($legacyName -or $ours.Count -gt 0) { $removed += 1 }
+            else { $kept.Add($token.Value) }
+        }
+        if ($removed -eq 0) { continue }
+        $updated = $raw.Substring(0,$items.Index) + ($kept -join ', ') + $raw.Substring($items.Index+$items.Length)
+        $backup = "$file.before-usage-dashboard.$(Get-Date -Format yyyyMMddHHmmss).bak"
+        Copy-Item -LiteralPath $file -Destination $backup -ErrorAction Stop
+        [System.IO.File]::WriteAllText($file, $updated, [System.Text.UTF8Encoding]::new($false))
+        Write-Host "Removed $removed old/duplicate plugin reference(s) from $name. Backup: $backup"
+    }
+}
+function Confirm-PluginIdentity {
+    param([string]$Directory,[string]$Expected)
+    $manifest = Join-Path $Directory 'package.json'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return $false }
+    try { $p = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json; return $p.name -eq $Expected }
+    catch { return $false }
+}

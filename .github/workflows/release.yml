@@ -1,0 +1,80 @@
+# Usage Dashboard
+# Copyright (c) 2026 ItanBlackwell.
+# SPDX-License-Identifier: MPL-2.0
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem installer -Filter *.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw "Invalid PowerShell: $($_.Name): $($errors -join '; ')" }
+          }
+      - name: Install and uninstall in isolated directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:OPENCODE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'usage-dashboard-release-smoke'
+          & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path
+          $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
+          if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing' }
+          & ./installer/Uninstall-UsageDashboard.ps1 -PurgeCachedData
+          if (Test-Path $target) { throw 'Uninstaller did not remove plugin' }
+
+  package:
+    needs: [windows-installer-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'require("./package.json").version')
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+      - name: Build and validate
+        run: |
+          set -e
+          for file in src/*.cjs browser-extension/*.js build.cjs; do node --check "$file"; done
+          node build.cjs
+          node --check dist/gui-experimental.cjs
+          python3 tools/make-distributions.py
+      - name: Checksums
+        run: (cd release && sha256sum Usage-Dashboard-*.zip > SHA256SUMS.txt)
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'require("./package.json").version')
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release tag already exists. Refusing to replace published assets."
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            "release/Usage-Dashboard-Portable-${VERSION}.zip" \
+            "release/Usage-Dashboard-Source-${VERSION}.zip" \
+            "release/SHA256SUMS.txt" \
+            --target "$GITHUB_SHA" \
+            --title "Usage Dashboard ${VERSION}" \
+            --notes-file RELEASE_NOTES.md \
+            --latest
