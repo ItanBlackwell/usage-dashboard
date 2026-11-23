@@ -1,5 +1,12 @@
 # Usage Dashboard
 
+[![Latest release](https://img.shields.io/github/v/release/ItanBlackwell/usage-dashboard?label=release)](https://github.com/ItanBlackwell/usage-dashboard/releases/latest)
+[![CI](https://github.com/ItanBlackwell/usage-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/ItanBlackwell/usage-dashboard/actions/workflows/ci.yml)
+[![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](LICENSE)
+![Windows](https://img.shields.io/badge/platform-Windows-0078D4)
+
+**Monitor AI-provider usage limits, API balances, and multiple accounts directly in OpenCode Desktop.**
+
 Usage Dashboard is an **open-source** plugin for
 **OpenCode Desktop**. It shows supported AI-provider quota windows, connected
 accounts and balances where available, and provides quick account switching.
@@ -20,7 +27,7 @@ Desktop versions.
 
 ## Installation (Windows)
 
-1. Download **Usage-Dashboard-Portable-0.13.0.zip** from [Releases](https://github.com/ItanBlackwell/usage-dashboard/releases) **when v0.13.0 is published**.
+1. Download **Usage-Dashboard-Portable-0.13.0.zip** from the [latest GitHub Release](https://github.com/ItanBlackwell/usage-dashboard/releases/latest).
 2. Extract the ZIP and completely close OpenCode Desktop.
 3. Run **`Install.cmd`** by double-clicking it, then restart OpenCode.
 4. Go to **Settings → General → Interface layout** and choose **Side tabs** or **Inbox**.
@@ -57,6 +64,14 @@ See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
   process and are never passed to the GUI or saved in the usage cache.
 - Optional [Chrome/Edge OpenAI Billing companion](docs/BROWSER_EXTENSION.md)
   for reading the visible prepaid balance on an already open Billing page.
+
+
+## Community and feedback
+
+- [Report a bug](https://github.com/ItanBlackwell/usage-dashboard/issues/new/choose)
+- [Suggest a feature](https://github.com/ItanBlackwell/usage-dashboard/issues/new/choose)
+- [Browse releases](https://github.com/ItanBlackwell/usage-dashboard/releases)
+- [Contributing guide](CONTRIBUTING.md)
 
 ## Development and contributions
 
