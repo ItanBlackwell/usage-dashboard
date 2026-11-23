@@ -1554,7 +1554,7 @@ function progress(ctx,parent,win,mode='single'){
   const reset=duration(ctx,win.resetsAt);
   if(reset){
     const label=add(tile,$('div',`font-size:10px;color:${palette.muted};line-height:1.15;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap`,`↻ ${compactReset(ctx,win.resetsAt)}`));
-    label.title=reset;
+    label.title=new Intl.DateTimeFormat(undefined,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'}).format(new Date(win.resetsAt));
   }
 }
 const PROVIDER_NAMES={codex:'OpenAI',claude:'Claude',gemini:'Gemini',deepseek:'DeepSeek',kimi:'Kimi',qwen:'Qwen',zai:'Z.AI',openrouter:'OpenRouter',minimax:'MiniMax'};
