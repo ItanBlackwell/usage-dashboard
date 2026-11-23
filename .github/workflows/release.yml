@@ -7,7 +7,6 @@ on:
   push:
     tags:
       - 'v*'
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -15,7 +14,6 @@ permissions:
 
 jobs:
   windows-installer-smoke:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[publish v0.13.0]')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +38,6 @@ jobs:
           if (Test-Path $target) { throw 'Uninstaller did not remove plugin' }
 
   package:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[publish v0.13.0]')
     needs: [windows-installer-smoke]
     runs-on: ubuntu-latest
     steps:
