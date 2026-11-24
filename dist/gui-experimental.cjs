@@ -2094,8 +2094,8 @@ module.exports = { nativeUpdater, createNativeUpdateDock };
 'use strict';
 
 // The GUI entry runs in the renderer AND Electron main. Only main sees secrets.
-// The vertical sidebar adapter is intentionally isolated: OpenCode GUI SDK
-// currently has no public left-sidebar footer slot. No host styles are patched.
+// The indicator placement adapter is intentionally isolated: OpenCode GUI SDK
+// currently has no public left-bottom indicator slot.
 const { Plugin, Ipc, Panel, Command, MenuItem } = require('@opencode/plugin/gui');
 const { Schema } = require('effect');
 const { onCleanup, createEffect, createRoot } = require('solid-js');
@@ -2936,13 +2936,14 @@ function indicatorGraphic(){
   return {svg,draw};
 }
 
-// Unsupported, narrowly scoped DOM adapter for the current vertical-tabs
-// sidebar. It uses the host's existing flex layout, not a fixed overlay or a
-// window.bottom Slot. It never relocates the usage button itself.
-// The native update action is optionally aligned by a separate reversible
-// adapter, keeping the host's original DOM event handlers and ownership.
-// The actual anchor is the full-height Portal child, not its clipped mount.
-const SIDEBAR_SELECTOR='aside[data-slot="vertical-tabs-sidebar"] [data-slot="vertical-tabs-mount"]';
+// Narrow DOM adapter for the desktop layouts. Vertical tabs retain the
+// existing in-flow footer; confirmed top tabs use a compact viewport anchor.
+// Only the plugin's own wrapper moves. Native updater alignment is separate
+// and reversible, and is enabled exclusively in the vertical sidebar.
+const VERTICAL_SIDEBAR_SELECTOR='aside[data-slot="vertical-tabs-sidebar"]';
+const SIDEBAR_SELECTOR=VERTICAL_SIDEBAR_SELECTOR+' [data-slot="vertical-tabs-mount"]';
+const TOP_TABS_SELECTOR='[data-slot="titlebar-tabs"]';
+const LAYOUT_SLOTS='[data-slot="vertical-tabs-sidebar"],[data-slot="vertical-tabs-mount"],[data-slot="vertical-tabs-footer"],'+TOP_TABS_SELECTOR;
 function sidebarMount(documentRef=document){
   if(typeof documentRef.querySelector!=='function')return null;
   const mount=documentRef.querySelector(SIDEBAR_SELECTOR);
@@ -2955,9 +2956,32 @@ function sidebarMount(documentRef=document){
     return classes.includes('size-full')&&classes.includes('flex-col');
   })||null;
 }
+function indicatorMount(documentRef=document){
+  const sidebar=sidebarMount(documentRef);
+  if(sidebar)return sidebar;
+  // A vertical sidebar may exist before its Portal mounts. Never mistake
+  // that transient state, or an unknown layout, for the horizontal layout.
+  if(documentRef.querySelector(VERTICAL_SIDEBAR_SELECTOR))return null;
+  const topTabs=Array.from(documentRef.querySelectorAll(TOP_TABS_SELECTOR)).some(tabs=>
+    !tabs.closest('[data-slot="mobile-tabs-drawer"]')&&tabs.getClientRects().length>0);
+  return topTabs?documentRef.body:null;
+}
+function layoutMutation(change){
+  const source=change.target;
+  return source?.matches?.(LAYOUT_SLOTS) ||
+    source?.closest?.('[data-slot="vertical-tabs-footer"]') ||
+    Array.from([...(change.addedNodes||[]),...(change.removedNodes||[])]).some(el=>
+      el?.matches?.(LAYOUT_SLOTS)||el?.querySelector?.(LAYOUT_SLOTS));
+}
 function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
-  const wrapper=$('div',`box-sizing:border-box;flex:0 0 auto;margin-top:auto;min-height:40px;display:flex;align-items:center;justify-content:flex-start;padding:4px 4px 0;border-top:1px solid ${palette.border}`);
+  const sidebarStyle=`box-sizing:border-box;flex:0 0 auto;margin-top:auto;min-height:40px;display:flex;align-items:center;justify-content:flex-start;padding:4px 4px 0;border-top:1px solid ${palette.border}`;
+  const topTabsStyle='box-sizing:border-box;position:fixed;left:8px;bottom:max(8px,env(safe-area-inset-bottom,0px));z-index:30;width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent';
+  const wrapper=$('div',sidebarStyle);
   wrapper.setAttribute('data-pv-usage-sidebar','true');
+  const setLayout=mode=>{
+    wrapper.style.cssText=mode==='top-tabs'?topTabsStyle:sidebarStyle;
+    wrapper.setAttribute('data-pv-usage-layout',mode);
+  };
   const button=add(wrapper,$('button',`box-sizing:border-box;width:32px;height:32px;min-width:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;border-radius:50%;background:transparent;color:${palette.text};border:0;padding:0;box-shadow:none;appearance:none`));
   button.type='button';button.setAttribute('data-pv-usage-trigger','true');button.setAttribute('aria-label',t(ctx,'usage.title'));
   button.setAttribute('aria-haspopup','dialog');button.setAttribute('aria-expanded','false');button.title=t(ctx,'usage.title');
@@ -3057,19 +3081,26 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
   const destroy=()=>{alive=false;clearInterval(interval);snapshotListeners.delete(changed);hide();window.removeEventListener('keydown',key);window.removeEventListener('resize',resize);wrapper.remove();};
   // IPC get remains a fallback for older Desktop builds that lack reactive state.
   void poll();
-  return {wrapper,hide,destroy};
+  return {wrapper,hide,destroy,setLayout,position};
 }
 function attachSidebarButton(ctx,client){
   if(typeof document==='undefined'||!document.body||typeof document.querySelector!=='function')return ()=>{};
   const updaterDock=nativeUpdate.createNativeUpdateDock();
-  const view=buildSidebarButton(ctx,client,{onResize:()=>updaterDock.sync(view.wrapper),getUpdaterBounds:updaterDock.bounds});
-  let disposed=false,scheduled=null,observer=null;
+  const view=buildSidebarButton(ctx,client,{onResize:()=>schedule(),getUpdaterBounds:updaterDock.bounds});
+  let disposed=false,scheduled=null,observer=null,mode=null;
   const mount=()=>{
     scheduled=null;if(disposed)return;
-    const target=sidebarMount(document);
-    if(!target){updaterDock.restore();if(view.wrapper.isConnected){view.hide();view.wrapper.remove();}return;}
-    if(view.wrapper.parentNode!==target){updaterDock.restore();view.hide();target.appendChild(view.wrapper);}
-    updaterDock.sync(view.wrapper);
+    const target=indicatorMount(document);
+    if(!target){
+      updaterDock.restore();view.hide();view.wrapper.remove();mode=null;return;
+    }
+    const nextMode=target===document.body?'top-tabs':'sidebar';
+    if(view.wrapper.parentNode!==target||mode!==nextMode){
+      updaterDock.restore();view.hide();view.setLayout(nextMode);
+      target.appendChild(view.wrapper);mode=nextMode;
+    }
+    if(mode==='sidebar')updaterDock.sync(view.wrapper);
+    view.position();
   };
   const schedule=()=>{
     if(disposed||scheduled!==null)return;
@@ -3079,26 +3110,16 @@ function attachSidebarButton(ctx,client){
   if(typeof MutationObserver==='function'){
     observer=new MutationObserver(changes=>{
       if(!view.wrapper.isConnected||!view.wrapper.parentNode?.isConnected)return schedule();
-      // The app mounts/unmounts its update pill as availability changes.
-      // Watch only the sidebar footer, not chat-message mutations.
-      if(changes.some(change=>{
-        const source=change.target;
-        return source?.matches?.('[data-slot="vertical-tabs-footer"]') ||
-          source?.closest?.('[data-slot="vertical-tabs-footer"]') ||
-          Array.from([...(change.addedNodes||[]),...(change.removedNodes||[])]).some(el=>el?.matches?.('[data-slot="vertical-tabs-footer"]'));
-      }))schedule();
+      // Detect layout transitions and native footer updates without
+      // reacting to ordinary chat-message mutations.
+      if(changes.some(layoutMutation))schedule();
     });
     observer.observe(document.body,{subtree:true,childList:true});
-    // A low-frequency check also catches sidebar class/host changes that do
-    // not add or remove DOM nodes (the observer watches childList only).
-    const watchdog=setInterval(()=>{
-      if(sidebarMount(document)!==view.wrapper.parentNode)schedule();
-      else updaterDock.sync(view.wrapper);
-    },5000);
+    // Catch visibility/class changes that do not generate child-list records.
+    const watchdog=setInterval(()=>{if(scheduled===null)mount();},5000);
     return ()=>{disposed=true;observer.disconnect();clearInterval(watchdog);if(scheduled!==null)clearTimeout(scheduled);updaterDock.restore();view.destroy();};
   }else{
-    // Older desktop builds without MutationObserver still get a safe retry.
-    const interval=setInterval(mount,2000);
+    const interval=setInterval(()=>{if(scheduled===null)mount();},2000);
     return ()=>{disposed=true;clearInterval(interval);if(scheduled!==null)clearTimeout(scheduled);updaterDock.restore();view.destroy();};
   }
 }
