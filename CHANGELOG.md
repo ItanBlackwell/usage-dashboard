@@ -2,9 +2,10 @@
 
 ## 0.13.0 (unreleased)
 
-- Detect the Billing page automatically after the dedicated login browser
-  closes. Remove manual URL input, retain explicit account confirmation, and
-  reject missing or ambiguous navigation records.
+- Complete Billing connection automatically after the dedicated login browser
+  exits. Remove manual URL input and confirmation controls, retain manual
+  provider authentication, and reject missing or ambiguous navigation records.
+  Handle missed browser-exit notifications and bounded transient retries.
 
 - Expand Billing browser detection to 26 Chromium browser variants, including
   Brave, Opera GX, Opera, Vivaldi, Chromium and preview channels. Prefer the
@@ -13,8 +14,8 @@
   Nonstandard Chromium derivatives are experimental.
 
 - Separate ordinary-browser authorization from headless Billing reads. Require
-  manual login, closure of the dedicated login profile and explicit account
-  confirmation. Do not automate OAuth or security verification.
+  manual login and closure of the dedicated login profile. Complete connection
+  automatically without automating OAuth or security verification.
 
 - Isolate Billing commands in a versioned IPC contract, acknowledge commands
   before launching the browser, and report transport-stage error codes.

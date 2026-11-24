@@ -70,16 +70,19 @@ runtime manifest rather than directly deserializing npm's lockfile.
 4. Verify that the page corresponds to this API key and close **all windows
    of the dedicated login profile**. Do not close unrelated browser profiles.
    Usage Dashboard automatically detects the Billing page from the dedicated
-   browser's navigation records for this login attempt. Return to the popup
-   and select **Confirm account**. No URL needs to be copied or pasted.
-   The plugin now attempts a headless read of the detected Billing page using
-   the existing session. A recognized explicit balance (including zero) is saved.
+   browser's navigation records for this login attempt, attempts a headless
+   read using the existing session, and completes the connection if the
+   balance is recognized. An explicit zero balance is valid.
+   No URL input, confirmation button or open popup is required.
 5. Subsequent reads happen in a headless browser on the configured refresh
    interval, while OpenCode Desktop is running. A manual refresh also requests
    a billing update. The browser is closed after each read.
 
-Repeat the procedure for each account that needs a balance. The association is
-user-confirmed, not independently verified by the provider API.
+Repeat the procedure for each account that needs a balance. Starting the
+connection authorizes automatic completion for that API account. The
+organization or workspace is selected by the user in the browser, not
+independently verified by the provider API. Missing or ambiguous Billing
+pages prevent automatic binding.
 
 ## Troubleshooting and disconnect
 
@@ -100,8 +103,13 @@ Desktop version. Main-process diagnostics record only fixed command outcomes.
 - If the session expires, headless access is denied, or the provider requires
   interactive verification, select **Reconnect Billing** and sign in manually.
   If the provider does not permit headless reads, the balance remains unavailable.
-- If the login browser is still open, close its dedicated windows and retry
-  confirmation. The plugin never terminates your login browser.
+- If the login browser is still open, close its dedicated windows. Connection
+  completes automatically after the browser exits. The plugin never terminates
+  your login browser. It retries briefly if navigation data is still being
+  saved or the browser profile is locked. If a terminal error remains, use
+  **Reconnect Billing** to begin a new attempt.
+- Keep OpenCode Desktop running until the initial connection completes. If it
+  is restarted during an unfinished login attempt, reconnect to start again.
 - If page detection finds no Billing page, reopen the dedicated browser and
   visit the correct provider's Billing page before closing it.
 - If several distinct Billing pages are found, reopen the dedicated browser and

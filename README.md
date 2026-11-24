@@ -59,8 +59,8 @@ No Developer mode or browser extension is necessary.
    workspace and open its Billing page.
 3. Verify that the billing account owns the connected API key, then close all
    windows of that separate login profile. The plugin discovers the Billing
-   page automatically. Return to the popup and click **Confirm account**.
-   No URL needs to be copied or pasted.
+   page, reads its balance and completes the connection automatically.
+   No URL input or confirmation in the popup is required.
 
 Only after manual sign-in is complete does the plugin attempt automated,
 headless balance reads using that isolated session. Authentication is never

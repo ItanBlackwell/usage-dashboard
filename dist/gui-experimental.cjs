@@ -925,7 +925,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,billingSessions:[]});
-const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
+const BILLING_STATES=new Set(['connecting','awaiting_login','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale','choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
 function sanitizeBillingSessions(value,accounts) {
   if(!Array.isArray(value))return [];
   const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
@@ -1148,10 +1148,10 @@ const BROWSERS = Object.freeze({
   'avg-secure': {name:'AVG Secure Browser',prog:['AVGHTML','AVGSecureBrowserHTML'],exe:'AVGBrowser.exe',dirs:['AVG/Browser/Application']}
 });
 const CHANNELS = Object.keys(BROWSERS);
-const ACTIONS = ['open','open_edge',...CHANNELS.map(id=>'open_'+id),'confirm','disconnect'];
+const ACTIONS = ['open','open_edge',...CHANNELS.map(id=>'open_'+id),'disconnect'];
 const CHOICE_STATES = ['choose_edge','choose_chrome','choose_browser'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
-const STATES = ['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale',
+const STATES = ['connecting','awaiting_login','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale',
   'choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
 
 function billingPage(provider,raw) {
@@ -1547,9 +1547,10 @@ function bounded(promise,ms) {
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,clock=Date.now,
   io=fs,chromiumLoader=()=>loadChromium(pluginFolder),browserFinder=findBrowser,
-  loginLauncher=startLoginBrowser,defaultBrowser=defaultWindowsBrowser,pageDiscovery=discoverBillingPage,env=process.env}={}) {
+  loginLauncher=startLoginBrowser,defaultBrowser=defaultWindowsBrowser,pageDiscovery=discoverBillingPage,
+  retryWait=pause,env=process.env}={}) {
   const manual=new Map(),busy=new Map(),contexts=new Set();
-  let stopped=false,timer=null,tickBusy=false;
+  let stopped=false,timer=null,loginTimer=null,tickBusy=false;
   const folder=account=>path.join(directory,crypto.createHash('sha256').update(account.provider+':'+account.id).digest('hex'));
   const bindingFile=account=>path.join(folder(account),'binding.json');
   const profile= (account,channel)=>path.join(folder(account),channel);
@@ -1658,7 +1659,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   }
   async function open(account,explicit=null){
     const existing=manual.get(account.id);
-    if(existing?.process.isRunning())return publish(account,'awaiting_confirmation');
+    if(existing?.process.isRunning())return publish(account,'awaiting_login');
     const old=await readBinding(account);
     try{
       // Check availability without launching an automated browser.
@@ -1682,54 +1683,93 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       const url=existing?.url||old?.url||ENTRY[account.provider];
       const startedAt=clock();
       const process=await loginLauncher({browser,profilePath,url,env});
-      const record={browser,process,url,profilePath,startedAt};
+      const record={account,browser,process,url,profilePath,startedAt,finished:false,completion:null};
       manual.set(account.id,record);
-      const snapshot=await publish(account,'awaiting_confirmation',{browser:browser.channel});
-      // Discover automatically when the dedicated native browser exits.
-      // The user still explicitly confirms the account before headless reads.
-      process.onExit?.(()=>{
-        if(stopped||manual.get(account.id)!==record)return;
-        void run(account,async()=>{
-          if(manual.get(account.id)===record&&!record.process.isRunning())await detectPage(account,record);
-        },true).catch(()=>{});
-      });
+      const snapshot=await publish(account,'awaiting_login',{browser:browser.channel});
+      // Authorization is always manual and outside Playwright. Once the
+      // dedicated browser exits, continue the user-initiated connection in
+      // main, regardless of whether the dashboard popup is still open.
+      process.onExit?.(()=>{void scheduleCompletion(account,record);});
+      // Also cover browser launchers that exit before the listener is attached.
+      if(!process.isRunning())void scheduleCompletion(account,record);
       return snapshot;
     }catch(e){return publish(account,safeError(e));}
   }
+  const sameAttempt=(account,record)=>!stopped&&manual.get(account.id)===record;
   async function detectPage(account,record){
     if(record.process.isRunning())return {state:'close_login_browser'};
     let result;
     try{result=await pageDiscovery({provider:account.provider,profilePath:record.profilePath,dedicatedDirectory:directory,since:record.startedAt,io});}
     catch{result={state:'billing_page_unavailable'};}
-    if(stopped||manual.get(account.id)!==record)return {state:'billing_page_unavailable'};
+    if(!sameAttempt(account,record))return {state:'billing_page_unavailable'};
     const url=result.state==='page_detected'?billingPage(account.provider,result.url):null;
     const state=url?'page_detected':(['billing_page_missing','billing_page_ambiguous','billing_page_unavailable'].includes(result.state)?result.state:'billing_page_unavailable');
-    await publish(account,state,{browser:record.browser.channel});
     return {state,url};
   }
-  async function confirm(account){
-    const record=manual.get(account.id);
-    if(!record)return publish(account,'login_required');
-    if(record.process.isRunning())return publish(account,'close_login_browser');
-    // Retry detection in case the native browser flushed history on shutdown.
-    // Do not accept arbitrary renderer-provided billing URLs.
-    const resultPage=await detectPage(account,record);
-    const url=resultPage.url;
-    if(!url)return store.cached();
-    let context,result;
+  async function completeLogin(account,record){
+    if(!sameAttempt(account,record)||record.process.isRunning()||!await current(account.id))return;
+    const browser=record.browser.channel;
+    const finish=async state=>{
+      if(!sameAttempt(account,record))return;
+      record.finished=true;
+      return publish(account,state,{browser});
+    };
+    let context;
     try{
-      // No browser process is killed or attached to. If Chromium reports
-      // that the profile remains in use, the user must close it manually.
-      context=await launch(account,record.browser);
-      result=await navigateBilling(context,account,url);
+      await publish(account,'checking_billing',{browser});
+      // The browser may still be flushing its dedicated history or releasing
+      // the profile lock. Retry only these transient failures, with a bound.
+      let detected;
+      for(const delay of [0,500,1500,3000]){
+        if(delay)await retryWait(delay);
+        if(!sameAttempt(account,record)||record.process.isRunning()||!await current(account.id))return;
+        detected=await detectPage(account,record);
+        if(detected.url||detected.state==='billing_page_ambiguous')break;
+      }
+      if(!detected?.url)return finish(detected?.state||'billing_page_unavailable');
+      let result;
+      for(const delay of [0,1000,3000]){
+        if(delay)await retryWait(delay);
+        if(!sameAttempt(account,record)||record.process.isRunning()||!await current(account.id))return;
+        try{
+          context=await launch(account,record.browser);
+          break;
+        }catch(e){
+          if(e?.message!=='profile_busy'||delay===3000)throw e;
+        }
+      }
+      if(!context)return finish('browser_error');
+      result=await navigateBilling(context,account,detected.url);
       await closeContext(context);context=null;
-      if(!await current(account.id))throw new Error('profile_error');
-      if(result.state!=='ok')return publish(account,result.state==='login_required'?'login_required':'confirmation_unavailable');
-      await saveBinding(account,{channel:record.browser.channel,url:result.url,executablePath:record.browser.executablePath});
+      if(!sameAttempt(account,record)||!await current(account.id))return;
+      // Never infer a zero balance or select another organization/workspace.
+      // Bind only a unique, recognized page from this login attempt for which
+      // the normal post-login read produced an actual finite amount.
+      if(result.state!=='ok')return finish(result.state==='login_required'?'login_required':'confirmation_unavailable');
+      await saveBinding(account,{channel:browser,url:result.url,executablePath:record.browser.executablePath});
+      if(!sameAttempt(account,record))return;
+      record.finished=true;
       manual.delete(account.id);
-      return publish(account,'ok',{amount:result.amount,checkedAt:clock(),browser:record.browser.channel});
-    }catch(e){return publish(account,safeError(e));}
-    finally{if(context)await closeContext(context).catch(()=>{});}
+      return publish(account,'ok',{amount:result.amount,checkedAt:clock(),browser});
+    }catch(e){
+      return finish(safeError(e));
+    }finally{if(context)await closeContext(context).catch(()=>{});}
+  }
+  function scheduleCompletion(account,record){
+    if(!sameAttempt(account,record)||record.finished||record.process.isRunning())return Promise.resolve();
+    if(record.completion)return record.completion;
+    // Use the same per-account queue as reconnect/disconnect and periodic reads.
+    // An exit notification, a watchdog check and a refresh can never launch
+    // competing headless readers for the same profile.
+    const task=run(account,()=>completeLogin(account,record),true)
+      .catch(async()=>{if(sameAttempt(account,record)){record.finished=true;await publish(account,'browser_error').catch(()=>{});}})
+      .finally(()=>{if(record.completion===task)record.completion=null;});
+    record.completion=task;
+    return task;
+  }
+  function checkLoginWindows(){
+    if(stopped)return;
+    for(const record of manual.values())void scheduleCompletion(record.account,record);
   }
   async function disconnect(account){
     const record=manual.get(account.id);
@@ -1751,7 +1791,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     if(!binding){
       const state=stateFor(await store.cached(),account.id,account.provider);
       if(Number.isFinite(state?.amount))await store.setBillingSession(account.id,account.provider,null);
-      else if(['connecting','awaiting_confirmation','confirmation_unavailable','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable'].includes(state?.state))await publish(account,'login_required');
+      else if(['connecting','awaiting_login','checking_billing','awaiting_confirmation','close_login_browser','page_detected'].includes(state?.state))await publish(account,'login_required');
       return;
     }
     let context;
@@ -1796,7 +1836,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       let executed=false;
       await run(account,async()=>{
         executed=true;
-        return verb==='confirm'?confirm(account):verb==='disconnect'?disconnect(account):
+        return verb==='disconnect'?disconnect(account):
           open(account,verb==='open_edge'?'msedge':verb.startsWith('open_')?verb.slice(5):null);
       },true);
       return executed?reply(true):reply(false,'account_unavailable');
@@ -1814,7 +1854,9 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       for(const id of manual.keys())if(!connected.has(id))manual.delete(id);
       for(const account of snapshot.accounts.filter(eligible)){
         if(stopped)break;
-        if(manual.has(account.id)||busy.has(account.id))continue;
+        const record=manual.get(account.id);
+        if(record){await scheduleCompletion(account,record);continue;}
+        if(busy.has(account.id))continue;
         if(!await current(account.id))continue;
         await run(account,()=>refreshAccount(account)).catch(()=>{});
       }
@@ -1824,12 +1866,16 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     if(timer||stopped)return;
     const ms=Math.max(1,Math.min(120,Number(intervalMinutes)||5))*60000;
     timer=setInterval(()=>void tick().catch(()=>{}),ms);timer.unref?.();
+    // Short, local watchdog for lost/missed process-exit notifications.
+    // It is idle when no interactive connection is pending.
+    loginTimer=setInterval(checkLoginWindows,1500);loginTimer.unref?.();
     // The account monitor starts independently. Try again shortly after startup
     // to avoid waiting an entire refresh interval for the initial inventory.
     void tick().catch(()=>{});
   }
   async function stop(){
     stopped=true;if(timer)clearInterval(timer);timer=null;
+    if(loginTimer)clearInterval(loginTimer);loginTimer=null;
     manual.clear();
     await Promise.allSettled([...contexts].map(c=>closeContext(c)));
     await Promise.allSettled([...busy.values()]);
@@ -2222,7 +2268,7 @@ const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),orga
 const Metrics = Ipc.define({id:'usage-dashboard.metrics.v3',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 // Version independently from the metrics contract. Older host clients may
 // retain method tables for an existing token across plugin reloads.
-const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v5',methods:{
+const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v6',methods:{
   ping:{output:Schema.String},
   submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String}),output:Schema.String},
   status:{input:Schema.Struct({id:Schema.String,ticket:Schema.String}),output:Schema.String}
@@ -2406,13 +2452,15 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
     choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
     choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
-    awaiting_confirmation:tr('Sign in, open the matching Billing page and close the dedicated browser.','Войди, открой нужную страницу Billing и закрой отдельное окно браузера.'),
-    page_detected:tr('Billing page detected automatically. Confirm the matching account.','Страница Billing найдена автоматически. Подтверди соответствие аккаунта.'),
+    awaiting_login:tr('Sign in, open the Billing page for this API account, then close the dedicated browser. Connection will finish automatically.','Войди, открой Billing нужного API-аккаунта и закрой отдельное окно. Подключение завершится автоматически.'),
+    checking_billing:tr('Connecting Billing automatically…','Автоматически подключаем Billing…'),
+    awaiting_confirmation:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
+    page_detected:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
     billing_page_missing:tr('Billing page not found. Reopen the browser and visit Billing.','Страница Billing не найдена. Открой браузер и перейди в Billing.'),
     billing_page_ambiguous:tr('Several Billing pages found. Reopen and visit only the matching page.','Найдено несколько страниц Billing. Открой браузер и перейди только на нужную страницу.'),
     billing_page_unavailable:tr('Could not read the dedicated browser navigation data. Reopen and retry.','Не удалось определить страницу в отдельном профиле браузера. Открой его повторно.'),
     confirmation_unavailable:tr('Balance not recognized. Check the Billing page and retry.','Баланс не распознан. Проверь страницу Billing и повтори.'),
-    close_login_browser:tr('Close all windows of this separate login profile, then confirm.','Закрой все окна отдельного профиля входа, затем подтверди.'),
+    close_login_browser:tr('Close all windows of the dedicated login profile.','Закрой все окна отдельного профиля входа.'),
     ok:tr('Billing connected','Billing подключён'),
     stale:tr('Last confirmed balance','Последний подтверждённый баланс'),
     login_required:tr('Sign-in required. Reconnect in the normal browser.','Требуется вход. Переподключи Billing в обычном браузере.'),
@@ -2445,8 +2493,8 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   line.setAttribute('data-pv-billing-session',status||'disconnected');
   const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
   const browserName=billing.BROWSERS[session?.browser]?.name;
-  const waiting=['awaiting_confirmation','confirmation_unavailable','close_login_browser','profile_busy','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable'].includes(status);
-  const busy=pending||status==='connecting';
+  const waiting=status==='awaiting_login';
+  const busy=pending||status==='connecting'||status==='checking_billing';
   const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
   if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback+(browserName&&!choosing?' · '+browserName:'')));
   const button=(verb,label,tooltip)=>{
@@ -2463,13 +2511,12 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
       button('open_'+id,name,tr('Open a dedicated profile in '+name+'.','Открыть отдельный профиль в '+name+'.'));
     }
     button('open',tr('Retry default','Повторить выбор'),tr('Check the default or saved browser again.','Повторно проверить браузер по умолчанию или сохранённый браузер.'));
-  }else if(waiting){
-    button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only after closing the login browser and checking that the Billing page matches this API key.','Подтверди только после закрытия окна входа и проверки соответствия страницы Billing этому API-ключу.'));
-    button('open',tr('Open browser','Открыть браузер'),tr('Reopen the normal login browser if needed.','Повторно открыть обычный браузер для входа.'));
-  }else{
-    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open a separate billing profile for this account.','Открыть отдельный профиль Billing для этого аккаунта.'));
+  }else if(!waiting&&status!=='checking_billing'){
+    // No post-login confirmation or address input: main finishes the attempt
+    // automatically after the native browser exits.
+    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Visit the matching organization or workspace; closing the window completes the connection automatically.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после закрытия окна подключение завершится автоматически.'));
   }
-  if(status)button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
+  if(status&&!waiting&&status!=='checking_billing')button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
 }
 function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder=null,onBilling=null,billingPending=null) {
   empty(target);
@@ -2716,7 +2763,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     let stage='ping';
     try{
       const version=await bounded(signal=>billingClient.ping({signal}),8000);
-      if(version!=='billing-v5'){billingUiErrors.set(id,'ipc_protocol');return;}
+      if(version!=='billing-v6'){billingUiErrors.set(id,'ipc_protocol');return;}
       stage='submit';
       const ack=await bounded(signal=>billingClient.submit({id,action,ticket},{signal}),10000);
       if(ack!=='queued'){
@@ -3144,11 +3191,11 @@ exports.default=Plugin.define({
     // scalar acknowledgements/statuses. Failures must not disable metrics.
     try{
       ctx.provide(BillingCommands,{
-        ping:()=> 'billing-v5',
+        ping:()=> 'billing-v6',
         submit:input=>billingCommands.submit(input),
         status:input=>billingCommands.status(input)
       });
-      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v5'});}catch{}
+      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v6'});}catch{}
     }catch{
       try{ctx.log?.write?.('warn','Usage Dashboard Billing IPC registration failed',{code:'B02'});}catch{}
     }

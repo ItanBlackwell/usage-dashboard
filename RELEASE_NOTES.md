@@ -21,8 +21,8 @@ Public-release preparation for Usage Dashboard. This release is **not published*
 
 See [Installation](docs/INSTALLATION.md) and [Billing Session](docs/BILLING_SESSION.md).
 Sign in in the ordinary dedicated browser, open the matching Billing page,
-close the login window, and confirm the account in Usage Dashboard before
-headless balance reads. Billing page detection is automatic.
+and close the login window. Page detection, the first headless balance read,
+and connection completion happen automatically without further popup actions.
 
 ## Improvements
 - Public-facing documentation, support guidelines and updated open-source license.

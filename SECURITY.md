@@ -21,11 +21,14 @@ and the potential impact. Redact all secrets and private account data.
   sanitized usage metadata.
 - Billing Session uses dedicated per-account browser profiles, never a user's
   existing browser profile. Manual login takes place in an ordinary browser
-  with no automation connection. Only after the user closes that window and
-  confirms the matching account are headless reads attempted. Billing page
+  with no automation connection. The initial Connect Billing action authorizes
+  automatic completion for the selected API account. Only after the user
+  closes the dedicated login browser are headless reads attempted. The user
+  must select the matching organization or workspace in the browser. Billing page
   discovery uses read-only navigation records of the dedicated profile and
   restricts the results to allowlisted provider Billing URLs from the current
-  login attempt. It does not read personal profiles, credentials, cookies,
+  login attempt. Missing or ambiguous page discovery fails closed rather than
+  selecting a different account. It does not read personal profiles, credentials,
   saved passwords or encrypted session files. Authentication remains in
   private local browser storage. The canonical Billing URL is retained in a
   local binding, not the renderer or metrics cache.

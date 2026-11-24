@@ -35,7 +35,7 @@ const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),orga
 const Metrics = Ipc.define({id:'usage-dashboard.metrics.v3',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 // Version independently from the metrics contract. Older host clients may
 // retain method tables for an existing token across plugin reloads.
-const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v5',methods:{
+const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v6',methods:{
   ping:{output:Schema.String},
   submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String}),output:Schema.String},
   status:{input:Schema.Struct({id:Schema.String,ticket:Schema.String}),output:Schema.String}
@@ -219,13 +219,15 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
     choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
     choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
-    awaiting_confirmation:tr('Sign in, open the matching Billing page and close the dedicated browser.','Войди, открой нужную страницу Billing и закрой отдельное окно браузера.'),
-    page_detected:tr('Billing page detected automatically. Confirm the matching account.','Страница Billing найдена автоматически. Подтверди соответствие аккаунта.'),
+    awaiting_login:tr('Sign in, open the Billing page for this API account, then close the dedicated browser. Connection will finish automatically.','Войди, открой Billing нужного API-аккаунта и закрой отдельное окно. Подключение завершится автоматически.'),
+    checking_billing:tr('Connecting Billing automatically…','Автоматически подключаем Billing…'),
+    awaiting_confirmation:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
+    page_detected:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
     billing_page_missing:tr('Billing page not found. Reopen the browser and visit Billing.','Страница Billing не найдена. Открой браузер и перейди в Billing.'),
     billing_page_ambiguous:tr('Several Billing pages found. Reopen and visit only the matching page.','Найдено несколько страниц Billing. Открой браузер и перейди только на нужную страницу.'),
     billing_page_unavailable:tr('Could not read the dedicated browser navigation data. Reopen and retry.','Не удалось определить страницу в отдельном профиле браузера. Открой его повторно.'),
     confirmation_unavailable:tr('Balance not recognized. Check the Billing page and retry.','Баланс не распознан. Проверь страницу Billing и повтори.'),
-    close_login_browser:tr('Close all windows of this separate login profile, then confirm.','Закрой все окна отдельного профиля входа, затем подтверди.'),
+    close_login_browser:tr('Close all windows of the dedicated login profile.','Закрой все окна отдельного профиля входа.'),
     ok:tr('Billing connected','Billing подключён'),
     stale:tr('Last confirmed balance','Последний подтверждённый баланс'),
     login_required:tr('Sign-in required. Reconnect in the normal browser.','Требуется вход. Переподключи Billing в обычном браузере.'),
@@ -258,8 +260,8 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   line.setAttribute('data-pv-billing-session',status||'disconnected');
   const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
   const browserName=billing.BROWSERS[session?.browser]?.name;
-  const waiting=['awaiting_confirmation','confirmation_unavailable','close_login_browser','profile_busy','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable'].includes(status);
-  const busy=pending||status==='connecting';
+  const waiting=status==='awaiting_login';
+  const busy=pending||status==='connecting'||status==='checking_billing';
   const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
   if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback+(browserName&&!choosing?' · '+browserName:'')));
   const button=(verb,label,tooltip)=>{
@@ -276,13 +278,12 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
       button('open_'+id,name,tr('Open a dedicated profile in '+name+'.','Открыть отдельный профиль в '+name+'.'));
     }
     button('open',tr('Retry default','Повторить выбор'),tr('Check the default or saved browser again.','Повторно проверить браузер по умолчанию или сохранённый браузер.'));
-  }else if(waiting){
-    button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only after closing the login browser and checking that the Billing page matches this API key.','Подтверди только после закрытия окна входа и проверки соответствия страницы Billing этому API-ключу.'));
-    button('open',tr('Open browser','Открыть браузер'),tr('Reopen the normal login browser if needed.','Повторно открыть обычный браузер для входа.'));
-  }else{
-    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open a separate billing profile for this account.','Открыть отдельный профиль Billing для этого аккаунта.'));
+  }else if(!waiting&&status!=='checking_billing'){
+    // No post-login confirmation or address input: main finishes the attempt
+    // automatically after the native browser exits.
+    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Visit the matching organization or workspace; closing the window completes the connection automatically.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после закрытия окна подключение завершится автоматически.'));
   }
-  if(status)button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
+  if(status&&!waiting&&status!=='checking_billing')button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
 }
 function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder=null,onBilling=null,billingPending=null) {
   empty(target);
@@ -529,7 +530,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     let stage='ping';
     try{
       const version=await bounded(signal=>billingClient.ping({signal}),8000);
-      if(version!=='billing-v5'){billingUiErrors.set(id,'ipc_protocol');return;}
+      if(version!=='billing-v6'){billingUiErrors.set(id,'ipc_protocol');return;}
       stage='submit';
       const ack=await bounded(signal=>billingClient.submit({id,action,ticket},{signal}),10000);
       if(ack!=='queued'){
@@ -957,11 +958,11 @@ exports.default=Plugin.define({
     // scalar acknowledgements/statuses. Failures must not disable metrics.
     try{
       ctx.provide(BillingCommands,{
-        ping:()=> 'billing-v5',
+        ping:()=> 'billing-v6',
         submit:input=>billingCommands.submit(input),
         status:input=>billingCommands.status(input)
       });
-      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v5'});}catch{}
+      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v6'});}catch{}
     }catch{
       try{ctx.log?.write?.('warn','Usage Dashboard Billing IPC registration failed',{code:'B02'});}catch{}
     }
