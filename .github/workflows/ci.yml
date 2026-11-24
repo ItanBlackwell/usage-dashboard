@@ -28,6 +28,29 @@ jobs:
           node build.cjs
           node --check dist/gui-experimental.cjs
           node -e 'const p=require("./package.json");if(p.name!=="usage-dashboard"||!p.exports?.["./gui-experimental"])process.exit(1)'
+      - name: Verify balance presentation and IPC fallback
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const p = require('./src/presentation.cjs');
+          const a = {id:'openrouter:a',provider:'openrouter',kind:'api',source:'OpenCode',state:'ok',message:'ok',active:true,balance:{amount:0,currency:'USD',kind:'balance'},balances:[],windows:[],credits:null,checkedAt:42};
+          const placeholder = {...a,active:false,state:'unavailable',message:'plugin_ipc_unavailable',balance:null,checkedAt:0};
+          const prior = {accounts:[a]};
+          const m = p.mergeInventoryFallback({accounts:[placeholder]},prior);
+          assert.equal(m.accounts[0].balance.amount,0);
+          assert.equal(m.accounts[0].state,'stale');
+          assert.equal(m.accounts[0].message,'plugin_ipc_unavailable');
+          assert.equal(p.mergeInventoryFallback({accounts:[{...placeholder,id:'openrouter:b'}]},prior).accounts[0].balance,null);
+          assert.equal(p.mergeInventoryFallback({accounts:[]},prior).accounts.length,0);
+          assert.equal(p.formatCurrency(0,'USD'),'$0.00');
+          assert.equal(p.formatCurrency(0,'CNY'),'¥0.00');
+          assert.equal(p.formatCurrency(null,'USD'),'—');
+          const b = {...placeholder,id:'openai:a',provider:'codex'};
+          const previous = {accounts:[b],browserBalance:{usd:0,currency:'USD',observedAt:42,source:'billing-page'}};
+          assert.equal(p.browserBalanceFor(b,p.mergeInventoryFallback({accounts:[b]},previous)).usd,0);
+          assert.equal(p.mergeInventoryFallback({accounts:[b,{...b,id:'openai:b'}]},previous).browserBalance,null);
+          NODE
       - name: Package and verify archives without test scripts or secrets
         shell: bash
         run: |

@@ -77,6 +77,13 @@ Balances require specific provider APIs or, for OpenAI and OpenCode Zen prepaid
 balances, the optional browser companion described in [BROWSER_EXTENSION.md](BROWSER_EXTENSION.md).
 Missing/unavailable metrics do **not** mean a $0 balance.
 
+If all API balances suddenly show dashes, refresh the popup and hover over an
+amount to see the reason. A plugin service warning indicates an IPC failure;
+previously confirmed values for the same account are retained when possible.
+For OpenRouter, a missing balance may also indicate missing key permissions or
+a failed provider request. For OpenAI and Zen, check the browser companion's
+badge as described in [BROWSER_EXTENSION.md](BROWSER_EXTENSION.md).
+
 ## OpenCode and OpenCode Go
 
 Connect the account in OpenCode's provider settings. OpenCode pay-as-you-go

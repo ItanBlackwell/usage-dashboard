@@ -87,6 +87,29 @@ function browserBalanceFor(account,snapshot) {
   const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
   return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
 }
+// Inventory-only metadata is not a new balance measurement. Retain previously
+// confirmed values only for the identical account while IPC is unavailable.
+function mergeInventoryFallback(inventory,previous) {
+  const current=Array.isArray(inventory?.accounts)?inventory.accounts:[];
+  const prior=Array.isArray(previous?.accounts)?previous.accounts:[];
+  const byId=new Map(prior.map(a=>[a.id,a]));
+  const accounts=current.map(a=>{
+    const p=byId.get(a.id);
+    if(!p||p.provider!==a.provider||p.kind!==a.kind||p.source!==a.source||p.message==='login_required')return a;
+    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits);
+    if(!known)return a;
+    return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
+      credits:p.credits,checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
+  });
+  const merged={...inventory,accounts,browserBalance:null,zenBrowserBalance:null};
+  for(const [provider,field] of [['codex','browserBalance'],['opencode','zenBrowserBalance']]){
+    const keys=connectedApiKeys(merged).filter(a=>a.provider===provider);
+    const oldKeys=connectedApiKeys(previous).filter(a=>a.provider===provider);
+    if(keys.length===1&&oldKeys.length===1&&keys[0].id===oldKeys[0].id&&keys[0].source===oldKeys[0].source)
+      merged[field]=browserBalanceFor(oldKeys[0],previous);
+  }
+  return merged;
+}
 function formatCurrency(amount,currency) {
   if(!Number.isFinite(amount)||!['USD','CNY'].includes(currency))return '—';
   return (currency==='CNY'?'¥':'$')+(amount===0?0:amount).toFixed(2);
@@ -113,5 +136,5 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,formatCurrency };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,formatCurrency,mergeInventoryFallback };
 

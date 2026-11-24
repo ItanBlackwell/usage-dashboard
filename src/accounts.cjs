@@ -475,8 +475,13 @@ async function readAllAccounts({ client, endpoint, env = process.env, home = os.
     evaluated.push(...page);
   }
   // This is an inventory check, not a statement about authorization or usage.
-  const warning = !credentialOK ? 'credentials_unavailable' :
-    !entries.length ? 'no_connected_accounts' : null;
+  // A temporarily empty credential response is not an empty account inventory
+  // if the integration endpoint still reports a connected stored credential.
+  const hasConnectedCredential=integrations.some(integration=>providerFor(integration?.id)&&
+    arr(integration?.connections).some(conn=>conn?.type==='credential'&&
+      typeof conn.id==='string'&&conn.status?.status!=='needs_auth'));
+  const warning = !credentialOK || (!credentials.length&&hasConnectedCredential)
+    ? 'credentials_unavailable' : !entries.length ? 'no_connected_accounts' : null;
   return { accounts:evaluated, checkedAt:time, inventoryWarning:warning };
 }
 

@@ -2,6 +2,9 @@
 
 ## 0.13.0 (unreleased)
 
+- Preserve confirmed account metrics during temporary plugin IPC fallback and
+  incomplete credential inventory responses. Show safe balance error reasons.
+
 - Prepare optional Billing companion setup from Install.cmd, preferring Edge
   over Chrome, copying the installed path, and guiding manual browser approval.
   Preserve pairing on upgrades and support non-interactive installations.

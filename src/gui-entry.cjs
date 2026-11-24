@@ -54,6 +54,8 @@ const stableAccountOrder = new Map();
 // Only an unconfirmed request may override active flags received from main.
 const visualIntents = new Map();
 let latestSelectedID=null;
+// Retain the last authoritative main-process snapshot across popup lifetimes.
+let latestVerifiedSnapshot=null;
 function notifySnapshot(snapshot){for(const listener of snapshotListeners){try{listener(snapshot);}catch{}}}
 // All user-facing generic text uses OpenCode's own translations. The host
 // supplies these keys in ALL supported Desktop languages and updates them as
@@ -248,6 +250,19 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const amountEl=card.querySelector('[data-pv-api-amount]');
     const ru=String(ctx.locale?.locale?.()||'en').startsWith('ru');
     if(amountEl && (!hasOwn||account.state==='stale')){
+      const reasons={
+        plugin_ipc_unavailable:['Plugin service unavailable; inventory-only mode.','Служба плагина недоступна; режим списка аккаунтов.'],
+        credential_not_readable:['The host did not supply a readable API credential.','OpenCode не предоставил доступный API-ключ.'],
+        unauthorized:['Provider rejected authorization (401).','Провайдер отклонил авторизацию (401).'],
+        forbidden:['Provider denied access (403).','Провайдер запретил доступ (403).'],
+        rate_limited:['Provider rate limited the request (429).','Провайдер ограничил частоту запросов (429).'],
+        request_failed:['Provider request failed or timed out.','Ошибка или таймаут запроса к провайдеру.'],
+        invalid_payload:['Provider returned an unsupported response.','Провайдер вернул неподдерживаемый ответ.'],
+        invalid_balance:['Provider returned an invalid balance.','Провайдер вернул некорректный баланс.'],
+        no_balance_access:['API key has no readable wallet balance or spending cap.','Ключ не предоставляет доступ к балансу или лимиту расходов.'],
+        no_usage_endpoint:['No supported balance endpoint.','Нет поддерживаемого API получения баланса.']
+      };
+      const reason=reasons[account.message]?.[ru?1:0];
       const note=balance?(ru?'Баланс из открытой страницы оплаты; проверьте соответствие аккаунта.':'Balance from the open billing page; verify the matching account.')
         :hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
         :['codex','opencode'].includes(account.provider)
@@ -255,7 +270,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
             ?(ru?'Несколько API-аккаунтов: баланс страницы оплаты нельзя безопасно привязать.':'Multiple API accounts: billing page balance cannot be safely attributed.')
             :(ru?'Откройте Billing в Chrome/Edge с расширением Usage Dashboard и проверьте его значок.':'Open Billing in Chrome/Edge with the Usage Dashboard extension and check its badge.'))
           :(ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.');
-      amountEl.title=[note,amountEl.title].filter(Boolean).join('\n');
+      amountEl.title=[note,reason,amountEl.title].filter(Boolean).join('\n');
     }
     const extras=Array.isArray(account.balances)?account.balances.filter(b=>b && b.kind==='balance' && b.currency!==own?.currency && Number.isFinite(b.amount)):[];
     if(extras.length) add(card,$('div',`margin-top:2px;font-size:10px;color:${palette.muted};font-variant-numeric:tabular-nums`,
@@ -346,9 +361,16 @@ function createView(ctx,client,{compact=false}={}) {
     return pending.size?{...snapshot,accounts:(snapshot.accounts||[]).map(a=>
       pending.has(a.provider)?{...a,active:a.id===pending.get(a.provider)}:a)}:snapshot;
   };
-  const showSnapshot=snapshot=>{
+  const showSnapshot=(snapshot,verified=true)=>{
     if(!alive||!snapshot)return;
-    lastServerSnapshot=snapshot;
+    if(verified){
+      if(snapshot.checkedAt||snapshot.accounts?.length){
+        latestVerifiedSnapshot=snapshot;
+        lastServerSnapshot=snapshot;
+      }
+    }else{
+      snapshot=presentation.mergeInventoryFallback(snapshot,lastServerSnapshot||latestVerifiedSnapshot);
+    }
     lastSnapshot=applyDesired(snapshot);
     hasData=!!(snapshot.accounts?.length||snapshot.organizations?.length||snapshot.checkedAt);
     renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
@@ -390,9 +412,9 @@ function createView(ctx,client,{compact=false}={}) {
     }catch(error){
       if(!alive||startedSwitch!==switchSequence||startedCommit!==commitVersion||activations.busy())return;
       const fallback=await publicIntegrationFallback(ctx);
-      if(!alive)return;
+      if(!alive||startedSwitch!==switchSequence||startedCommit!==commitVersion||activations.busy())return;
       if(fallback?.accounts?.length){
-        showSnapshot(fallback);
+        showSnapshot(fallback,false);
         errorState('fallback');
       }else{
         errorState(error?.message==='timeout'?'timeout':'ipc');
@@ -425,6 +447,7 @@ function createView(ctx,client,{compact=false}={}) {
       // Keep a completed older activation as the rollback baseline, but do
       // not display it while a newer queued choice is still desired.
       lastServerSnapshot=snapshot;
+      latestVerifiedSnapshot=snapshot;
       commitVersion++;
       if(desiredByProvider.get(provider)===id)desiredByProvider.delete(provider);
       // Do not clear a newer choice made from another popup/window.
@@ -462,6 +485,8 @@ function createView(ctx,client,{compact=false}={}) {
       createEffect(()=>{
         const latest=client.state();
         if(!alive||!latest)return;
+        // A pushed main update supersedes an older request or inventory fallback.
+        commitVersion++;
         showSnapshot(latest);
       });
     });
