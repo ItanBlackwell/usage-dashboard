@@ -25,6 +25,8 @@ On Windows, the plugin attempts to close the dedicated window automatically
 after recognizing a stable Billing page and balance. If unavailable, close
 that window manually. Page detection, the first headless balance read, and
 connection completion then happen automatically without further popup actions.
+The reader supports nested credit-balance elements and localized USD amounts.
+Fixed window and balance diagnostic codes distinguish compatibility failures.
 
 ## Improvements
 - Public-facing documentation, support guidelines and updated open-source license.

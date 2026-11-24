@@ -2,6 +2,12 @@
 
 ## 0.13.0 (unreleased)
 
+- Improve Billing balance detection for nested markup, localized credit labels
+  and fractional USD balances. Allow slow provider pages to finish loading.
+  Enable standard Chromium accessibility for the dedicated login window,
+  handle nested frame documents, and distinguish window and balance failures
+  using sanitized diagnostic codes.
+
 - Automatically close the dedicated Billing login window on Windows when a
   stable, unambiguous Billing document and balance are visible. Verify process
   and profile ownership, request a graceful UI Automation close, and retain

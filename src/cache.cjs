@@ -10,7 +10,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,billingSessions:[]});
-const BILLING_STATES=new Set(['connecting','awaiting_login','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale','choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
+const BILLING_STATES=new Set(['connecting','awaiting_login','awaiting_login_window','awaiting_login_document','awaiting_login_tabs','awaiting_login_balance','awaiting_login_ready','awaiting_login_helper','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale','choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
 function sanitizeBillingSessions(value,accounts) {
   if(!Array.isArray(value))return [];
   const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
@@ -18,7 +18,7 @@ function sanitizeBillingSessions(value,accounts) {
   for(const s of value.slice(0,80)){
     if(!s||typeof s.id!=='string'||eligible.get(s.id)!==s.provider||!BILLING_STATES.has(s.state))continue;
     const valid=typeof s.amount==='number'&&Number.isFinite(s.amount)&&s.amount>=(s.provider==='opencode'?0:-1000000)&&s.amount<=100000000;
-    const amount=valid&&['ok','stale','login_required','balance_unavailable','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
+    const amount=valid&&['ok','stale','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
     const checkedAt=amount!==null&&Number.isFinite(s.checkedAt)&&s.checkedAt>0?s.checkedAt:0;
     const safeId=id=>typeof id==='string'&&/^[a-z][a-z0-9-]{0,39}$/.test(id);
     const browser=safeId(s.browser)?s.browser:null;

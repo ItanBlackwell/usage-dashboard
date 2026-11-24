@@ -176,6 +176,7 @@ jobs:
                   assert.ok(args.includes('--user-data-dir='+dir));
                   assert.ok(args.includes(url));
                   assert.ok(!args.some(a=>/remote-debugging|enable-automation|no-sandbox/.test(a)));
+                  assert.ok(args.includes('--force-renderer-accessibility=complete'));
                   queueMicrotask(()=>child.emit('spawn'));return child;
                 }});
               assert.equal(native.isRunning(),true);
@@ -500,6 +501,9 @@ jobs:
           if ($null -ne (Get-CanonicalBillingUrl 'https://platform.openai.com.example.invalid/settings/organization/billing/overview')) { throw 'Foreign origin accepted' }
           if ($null -eq (Get-UsdAmount '$0.00') -or (Get-UsdAmount '$0.00') -ne 0) { throw 'Zero balance rejected' }
           if ($null -ne (Get-UsdAmount 'Balance unknown')) { throw 'Unknown amount accepted' }
+          if ((Get-UsdAmount 'USD 0.012345') -ne [decimal]0.012345) { throw 'Fractional credits rejected' }
+          if ((Get-UsdAmount '1 234,56 USD') -ne [decimal]1234.56) { throw 'Localized amount rejected' }
+          if ($null -ne (Get-UsdAmount '10 EUR')) { throw 'Foreign currency accepted' }
           # Negative test: a real unrelated process without the dedicated profile
           # argument must never be accepted, even with its real PID and path.
           $self = Get-Process -Id $PID
@@ -537,6 +541,18 @@ jobs:
               await page.setContent('<title>Usage Dashboard smoke</title><p>Credit balance</p><p>$0.00</p>');
               const value=await page.evaluate(readBillingAmount,'codex');
               if(value!==0)throw Error('Synthetic zero balance was not recognized');
+              const assert=require('node:assert/strict');
+              const check=async(html,provider,state,amount=null)=>{
+                await page.setContent(html);
+                assert.deepEqual(await page.evaluate(readBillingAmount,{provider,diagnostic:true}),{state,amount});
+              };
+              await check('<main><section><div><h2>Credit balance</h2></div><div><span>$</span> <span>0.012345</span></div><button>Add credits</button></section><section><h2>Monthly budget</h2><p>$100.00</p></section></main>','codex','ok',0.012345);
+              await check('<main><div><span>Available credits</span><span>1 234,56 USD</span></div><div>Balance $90.00</div></main>','opencode','ok',1234.56);
+              await check('<main><p>\u0411\u0430\u043b\u0430\u043d\u0441 \u043a\u0440\u0435\u0434\u0438\u0442\u043e\u0432</p><p>$0.00</p></main>','codex','ok',0);
+              await check('<main><p>Monthly budget</p><p>$100</p></main>','codex','billing_label_missing');
+              await check('<main><p>Credit balance</p><p>Not available</p><p>$99</p></main>','codex','billing_value_missing');
+              await check('<main><p>Credit balance $2</p><p>Available balance $3</p></main>','codex','billing_value_ambiguous');
+              await check('<main><p>Credit balance</p><p>0 EUR</p></main>','codex','billing_value_missing');
             }finally{if(context)await context.close();await fs.rm(profile,{recursive:true,force:true});}
           })().catch(e=>{console.error(e);process.exitCode=1;});
           '@ | node

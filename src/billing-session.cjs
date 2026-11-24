@@ -45,8 +45,8 @@ const CHANNELS = Object.keys(BROWSERS);
 const ACTIONS = ['open','open_edge',...CHANNELS.map(id=>'open_'+id),'disconnect'];
 const CHOICE_STATES = ['choose_edge','choose_chrome','choose_browser'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
-const STATES = ['connecting','awaiting_login','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale',
-  'choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
+const STATES = ['connecting','awaiting_login','awaiting_login_window','awaiting_login_document','awaiting_login_tabs','awaiting_login_balance','awaiting_login_ready','awaiting_login_helper','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale',
+  'choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
 
 function billingPage(provider,raw) {
   try {
@@ -225,44 +225,89 @@ function eligible(account) {
   return account?.kind==='api'&&PROVIDERS.has(account.provider)&&typeof account.id==='string'&&
     account.id.length>0&&account.id.length<=120&&account.message!=='login_required'&&account.message!=='plugin_ipc_unavailable';
 }
-// Runs inside the provider page. Return only a finite USD amount or null;
-// no HTML, account labels, cookies, localStorage, or raw response leaves it.
-function readBillingAmount(provider) {
-  const norm=x=>String(x??'').replace(/\s+/g,' ').trim();
-  const visible=el=>!!el&&el.nodeType===1&&!el.closest('button,input,script,style,[hidden],[aria-hidden="true"]')&&
+// Runs inside the provider page. Only a finite USD amount and fixed
+// diagnostic code leave the document; never HTML, raw text or account data.
+function readBillingAmount(input) {
+  const provider=typeof input==='string'?input:input?.provider;
+  const diagnostic=typeof input==='object'&&input?.diagnostic===true;
+  const norm=x=>String(x??'').replace(/\s+/g,' ').replace(/\u2212/g,'-').trim();
+  const visible=el=>!!el&&el.nodeType===1&&!el.closest('button,input,textarea,select,script,style,[hidden],[aria-hidden="true"],[role="button"],[role="dialog"],[role="menu"]')&&
     el.getClientRects().length>0&&getComputedStyle(el).visibility!=='hidden';
-  const parse=text=>{
-    const m=norm(text).match(/^(?:([-−]?)\s*(?:US\s*\$|\$|USD)\s*([-−]?)\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?|([-−]?)\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?\s*USD)$/i);
-    if(!m||(m[1]&&m[2]))return null;
-    const n=Number((m[3]||m[6]).replaceAll(',','')+'.'+(m[4]||m[7]||'0'))*(m[1]||m[2]||m[5]?-1:1);
-    return Number.isFinite(n)&&n>=(provider==='opencode'?0:-1000000)&&n<=100000000?(n===0?0:n):null;
+  const text=el=>visible(el)?norm(el.innerText):'';
+  const parse=raw=>{
+    let value=norm(raw);
+    if(!value||value.length>48)return null;
+    const prefix=value.match(/^(-?)\s*(?:US\s*\$|\$|USD)\s*/i);
+    const suffix=value.match(/\s*(?:USD|US\s*\$|\$)$/i);
+    if(prefix){value=prefix[1]+value.slice(prefix[0].length);}
+    else if(suffix){value=value.slice(0,-suffix[0].length).trim();}
+    else return null;
+    // Explicit USD only. Accept grouped thousands and localized decimals
+    // where their separators are unambiguous; preserve fractional credits.
+    if(/^-?\d{1,3}(?: \d{3})+(?:[.,]\d{1,6})?$/.test(value))value=value.replaceAll(' ','').replace(',','.');
+    else if(/^-?\d{1,3}(?:,\d{3})+(?:\.\d{1,6})?$/.test(value))value=value.replaceAll(',','');
+    else if(/^-?\d{1,3}(?:\.\d{3})+,\d{1,6}$/.test(value))value=value.replaceAll('.','').replace(',','.');
+    else if(/^-?\d+,\d{1,2}$/.test(value))value=value.replace(',','.');
+    if(!/^-?\d+(?:\.\d{1,6})?$/.test(value))return null;
+    const amount=Number(value);
+    return Number.isFinite(amount)&&amount>=(provider==='opencode'?0:-1000000)&&amount<=100000000?(amount===0?0:amount):null;
   };
-  const label=provider==='opencode'
-    ? /^(?:credit balance|prepaid balance|available credits?|current balance|available balance|balance|credits)$/i
-    : /^(?:credit balance|prepaid balance|available credits?|current balance|available balance)$/i;
-  const root=document.querySelector('main,[role="main"]')||document.body;
-  if(!root)return null;
-  const values=new Set();
-  const add=n=>{if(n!==null)values.add(n);};
-  for(const el of root.querySelectorAll('div,span,p,dt,dd,h1,h2,h3,h4,h5,h6,strong,b,label')){
-    if(!visible(el))continue;
-    const text=norm(el.innerText);
-    if(!text||text.length>180)continue;
-    const inline=text.match(/^(.+?)(?:\s*[:：]\s*|\s+)((?:[-−]?\s*(?:US\s*\$|\$|USD)|[-−]?\s*\d).+)$/i);
-    if(inline&&label.test(inline[1]))add(parse(inline[2]));
-    if(!label.test(text.replace(/[:：]$/,'')))continue;
-    // Keep the search local to the labelled value, never scan unrelated
-    // invoice, top-up, payment-method, budget, or threshold amounts.
-    const candidates=[el.nextElementSibling,el.parentElement?.nextElementSibling,el.parentElement];
-    for(const candidate of candidates){
-      if(!visible(candidate))continue;
-      const s=norm(candidate.innerText);
-      const tail=s.toLowerCase().startsWith(text.toLowerCase())?s.slice(text.length).replace(/^\s*[:：]\s*/,''):s;
-      const value=parse(tail);
-      if(value!==null){add(value);break;}
+  // High-specificity labels take precedence over generic labels. Never
+  // interpret budget, monthly spending, payment, invoice or top-up amounts.
+  const explicit= /^(?:(?:current |available |remaining )?credit balance|prepaid (?:credit )?balance|available credits?|remaining credits?|credits? remaining|prepaid credits?|current balance|available balance|credit remaining|баланс кредитов|остаток кредитов|доступные кредиты|кредитный баланс|текущий баланс|доступный баланс)(?:\s*\(USD\))?$/i;
+  const generic=/^(?:credits|balance|кредиты|баланс)(?:\s*\(USD\))?$/i;
+  const kind=label=>explicit.test(norm(label).replace(/[:：]$/,''))?2:provider==='opencode'&&generic.test(norm(label).replace(/[:：]$/,''))?1:0;
+  const values=[new Set(),new Set(),new Set()];
+  const seen=[false,false,false];
+  const add=(k,n)=>{if(n!==null)values[k].add(n);};
+  const result=(state,amount=null)=>diagnostic?{state,amount}:amount;
+  const mainRoots=[...document.querySelectorAll('main,[role="main"]')].filter(visible);
+  const roots=mainRoots.length?mainRoots:[document.body].filter(visible);
+  const visited=new Set();
+  for(const root of roots){
+    for(const el of root.querySelectorAll('div,span,p,dt,dd,h1,h2,h3,h4,h5,h6,strong,b,label,section,article,header,output,small')){
+      if(visited.has(el)||!visible(el))continue;
+      visited.add(el);
+      const label=text(el);
+      if(!label||label.length>160)continue;
+      // A single logical label/value may be split across many nested spans.
+      const inline=label.match(/^(.+?)(?:\s*[:：]\s*|\s+)((?:-?\s*(?:US\s*\$|\$|USD)|-?\s*\d).+)$/i);
+      if(inline){
+        const k=kind(inline[1]);
+        if(k){seen[k]=true;add(k,parse(inline[2]));}
+      }
+      const k=kind(label);
+      if(!k)continue;
+      seen[k]=true;
+      // Inspect only immediate following siblings and bounded wrappers.
+      // Stop at a nonempty unrelated sibling; don't scan arbitrary cards.
+      let node=el;
+      for(let depth=0;node&&node!==root&&depth<4;depth++,node=node.parentElement){
+        if(depth>0&&text(node)!==label)break;
+        let next=node.nextElementSibling;
+        for(let skip=0;next&&skip<3;skip++,next=next.nextElementSibling){
+          if(!visible(next))continue;
+          const adjacent=text(next);
+          if(!adjacent)continue;
+          const amount=parse(adjacent);
+          if(amount!==null)add(k,amount);
+          break;
+        }
+        const parent=node.parentElement;
+        if(parent&&parent!==root){
+          const p=text(parent);
+          if(p.length<=160&&p.toLowerCase().startsWith(label.toLowerCase()))
+            add(k,parse(p.slice(label.length).replace(/^\s*[:：]\s*/,'')));
+        }
+      }
     }
   }
-  return values.size===1?[...values][0]:null;
+  // If a specific label exists, never fall back to a generic unrelated value.
+  const k=seen[2]?2:seen[1]?1:0;
+  if(!k)return result('billing_label_missing');
+  if(values[k].size>1)return result('billing_value_ambiguous');
+  if(values[k].size===1)return result('ok',[...values[k]][0]);
+  return result('billing_value_missing');
 }
 function browserEnvironment(env) {
   // Avoid passing provider API secrets or arbitrary environment variables from
@@ -409,7 +454,9 @@ function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:chil
     let child;
     try{
       child=spawn(browser.executablePath,[
-        '--user-data-dir='+profilePath,'--new-window','--disable-background-mode','--disable-sync',url
+        '--user-data-dir='+profilePath,'--new-window','--disable-background-mode','--disable-sync',
+        // Standard accessibility mode, not browser automation or debugging.
+        '--force-renderer-accessibility=complete',url
       ],{shell:false,detached:true,windowsHide:false,stdio:'ignore',env:browserEnvironment(env)});
     }catch{reject(new Error('browser_error'));return;}
     child.once('error',()=>reject(new Error('browser_error')));
@@ -431,7 +478,7 @@ function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:chil
 // cannot block the host. Timeout/abort affects only the helper.
 function inspectBillingWindow({pluginFolder,browser,profilePath,provider,startedAt,pid,expected=null,signal,env=process.env,
   platform=process.platform,execFile=require('node:child_process').execFile}={}){
-  const unavailable={state:'unavailable'};
+  const unavailable={state:'unavailable',reason:'helper'};
   if(platform!=='win32'||!pluginFolder||!PROVIDERS.has(provider)||
     !Number.isSafeInteger(pid)||pid<=0||pid>2147483647||!Number.isFinite(startedAt)||startedAt<=0||
     !browserMatchesPath(browser?.channel,browser?.executablePath)||!path.win32.isAbsolute(profilePath||'')||
@@ -453,7 +500,10 @@ function inspectBillingWindow({pluginFolder,browser,profilePath,provider,started
         if(error){resolve(unavailable);return;}
         try{
           const r=JSON.parse(String(stdout).trim());
-          if(!['ready','close_requested'].includes(r?.state)){resolve({state:r?.state==='not_ready'?'not_ready':'unavailable'});return;}
+          if(!['ready','close_requested'].includes(r?.state)){
+            const reason=['window','document','tabs','balance','helper'].includes(r?.reason)?r.reason:'helper';
+            resolve({state:r?.state==='not_ready'?'not_ready':'unavailable',reason});return;
+          }
           const url=billingPage(provider,r.url),window=r.window;
           if(!url||!Number.isInteger(window)||window===0||window< -2147483648||window>2147483647||
             (r.state==='close_requested'&&(!expectedUrl||url!==expectedUrl||window!==expected.window))){
@@ -547,25 +597,28 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     return context;
   }
   const safeError=e=>STATES.includes(e?.message)?e.message:'browser_error';
-  async function readPage(context,account,expected=null,wait=8000){
+  async function readPage(context,account,expected=null,wait=30000){
     const until=Date.now()+wait;
+    let last='billing_read_failed';
     do{
       if(stopped)return {state:'browser_error'};
       const pages=context.pages().map(page=>({page,url:billingPage(account.provider,page.url())})).filter(p=>p.url);
-      if(pages.length>1)return {state:'confirmation_unavailable'};
+      if(pages.length>1)return {state:'billing_page_ambiguous'};
       if(pages.length===1){
         const {page,url}=pages[0];
-        if(expected&&url!==expected)return {state:'login_required'};
+        if(expected&&url!==expected)return {state:'billing_page_ambiguous'};
         try{
-          const value=await bounded(page.evaluate(readBillingAmount,account.provider),4000);
+          const observation=await bounded(page.evaluate(readBillingAmount,{provider:account.provider,diagnostic:true}),5000);
+          const value=typeof observation==='number'?observation:observation?.amount;
           if(Number.isFinite(value)&&value>=(account.provider==='opencode'?0:-1000000)&&value<=100000000&&
             billingPage(account.provider,page.url())===url)return {state:'ok',amount:value,url};
-        }catch{}
+          last=['billing_label_missing','billing_value_missing','billing_value_ambiguous'].includes(observation?.state)?observation.state:'billing_read_failed';
+        }catch{last='billing_read_failed';}
       }
       if(Date.now()>=until)break;
-      await pause(400);
+      await pause(500);
     }while(Date.now()<until);
-    return {state:expected?(context.pages().some(p=>billingPage(account.provider,p.url())===expected)?'balance_unavailable':'login_required'):'confirmation_unavailable'};
+    return {state:expected&&!context.pages().some(p=>billingPage(account.provider,p.url())===expected)?'login_required':last};
   }
   async function navigateBilling(context,account,url){
     const page=context.pages()[0]||await context.newPage();
@@ -581,10 +634,12 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       }
       return route.continue();
     });
-    try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:15000});}
+    try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000});}
     catch(e){
-      if(blocked||!billingPage(account.provider,page.url()))return {state:'login_required'};
-      throw e;
+      if(blocked)return {state:'login_required'};
+      if(!billingPage(account.provider,page.url()))return {state:'billing_navigation_failed'};
+      // A slow SPA may already have reached the Billing URL even when
+      // domcontentloaded timed out; let the bounded read inspect it.
     }
     if(blocked)return {state:'login_required'};
     // Only evaluate the expected billing document; never interact with OAuth,
@@ -593,7 +648,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   }
   async function open(account,explicit=null){
     const existing=manual.get(account.id);
-    if(existing?.process.isRunning())return publish(account,'awaiting_login');
+    if(existing?.process.isRunning())return store.cached();
     const old=await readBinding(account);
     try{
       // Check availability without launching an automated browser.
@@ -618,7 +673,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       const startedAt=clock();
       const process=await loginLauncher({browser,profilePath,url,env});
       const record={account,browser,process,url,profilePath,startedAt,finished:false,completion:null,
-        windowProbe:null,windowAbort:null,lastWindowProbe:0,readyWindow:null,closeRequested:false,autoCloseUrl:null};
+        windowProbe:null,windowAbort:null,lastWindowProbe:0,readyWindow:null,closeRequested:false,autoCloseUrl:null,windowStatus:'awaiting_login'};
       manual.set(account.id,record);
       const snapshot=await publish(account,'awaiting_login',{browser:browser.channel});
       // Authorization is always manual and outside Playwright. Once the
@@ -683,7 +738,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       // Never infer a zero balance or select another organization/workspace.
       // Bind only a unique, recognized page from this login attempt for which
       // the normal post-login read produced an actual finite amount.
-      if(result.state!=='ok')return finish(result.state==='login_required'?'login_required':'confirmation_unavailable');
+      if(result.state!=='ok')return finish(STATES.includes(result.state)?result.state:'billing_read_failed');
       await saveBinding(account,{channel:browser,url:result.url,executablePath:record.browser.executablePath});
       if(!sameAttempt(account,record))return;
       record.finished=true;
@@ -724,12 +779,23 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
         provider:account.provider,startedAt:record.startedAt,pid:record.process.pid,expected,signal:controller.signal,env});
       if(!sameAttempt(account,record))return;
       const url=billingPage(account.provider,result?.url),window=result?.window;
+      let nextStatus='awaiting_login';
       if(result?.state==='close_requested'&&expected&&url===expected.url&&window===expected.window){
         record.autoCloseUrl=url;record.closeRequested=true;
         record.readyWindow=null;
+        nextStatus='awaiting_login_ready';
       }else if(result?.state==='ready'&&url&&Number.isInteger(window)&&window!==0){
         record.readyWindow=candidate?.url===url&&candidate.window===window?candidate:{url,window,since:clock()};
-      }else record.readyWindow=null;
+        nextStatus='awaiting_login_ready';
+      }else{
+        record.readyWindow=null;
+        const reasons={window:'awaiting_login_window',document:'awaiting_login_document',tabs:'awaiting_login_tabs',balance:'awaiting_login_balance',helper:'awaiting_login_helper'};
+        nextStatus=reasons[result?.reason]||'awaiting_login';
+      }
+      if(record.windowStatus!==nextStatus&&record.process.isRunning()&&sameAttempt(account,record)){
+        record.windowStatus=nextStatus;
+        await publish(account,nextStatus,{browser:record.browser.channel});
+      }
     }).catch(()=>{record.readyWindow=null;}).finally(()=>{
       if(record.windowProbe===task){record.windowProbe=null;record.windowAbort=null;}
       if(!record.process.isRunning())void scheduleCompletion(account,record);
@@ -764,7 +830,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     if(!binding){
       const state=stateFor(await store.cached(),account.id,account.provider);
       if(Number.isFinite(state?.amount))await store.setBillingSession(account.id,account.provider,null);
-      else if(['connecting','awaiting_login','checking_billing','awaiting_confirmation','close_login_browser','page_detected'].includes(state?.state))await publish(account,'login_required');
+      else if((['connecting','checking_billing','awaiting_confirmation','close_login_browser','page_detected'].includes(state?.state)||state?.state?.startsWith('awaiting_login')))await publish(account,'login_required');
       return;
     }
     let context;

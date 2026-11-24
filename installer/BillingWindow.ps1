@@ -16,13 +16,14 @@ param(
     [int]$ExpectedWindow = 0
 )
 $ErrorActionPreference = 'Stop'
+$script:ProbeReason = 'helper'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 
 function Write-Result {
-    param([string]$State,[string]$Url = '',[int]$Window = 0)
+    param([string]$State,[string]$Url = '',[int]$Window = 0,[string]$Reason = 'helper')
     # Fixed status, canonical billing URL and HWND only; never raw UIA output.
-    @{state=$State;url=$Url;window=$Window} | ConvertTo-Json -Compress
+    @{state=$State;url=$Url;window=$Window;reason=$Reason} | ConvertTo-Json -Compress
 }
 
 function Get-CanonicalBillingUrl {
@@ -78,20 +79,39 @@ function Test-OwnedProcess {
 function Get-DocumentUrl {
     param($Document)
     $pattern = $null
-    if (-not $Document.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) { return $null }
-    # The loaded document's value, not the editable address bar, is the URL.
-    return Get-CanonicalBillingUrl ([string]$pattern.Current.Value)
+    if ($Document.Current.IsPassword) { return $null }
+    if ($Document.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) {
+        $url = Get-CanonicalBillingUrl ([string]$pattern.Current.Value)
+        if ($url) { return $url }
+    }
+    # Some Chromium providers expose the document value property without
+    # advertising the entire ValuePattern. Never use the editable address bar.
+    $value = $Document.GetCurrentPropertyValue([System.Windows.Automation.ValuePattern]::ValueProperty,$true)
+    if ($value -is [string]) { return Get-CanonicalBillingUrl $value }
+    return $null
 }
 
 function Get-UsdAmount {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text) -or $Text.Length -gt 48) { return $null }
     $value = ($Text -replace [char]0x2212,'-' -replace '\s+',' ').Trim()
-    if ($value -notmatch '^(?<sign>-?)\s*(?:US\s*\$|\$|USD)\s*(?<number>-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)$') { return $null }
-    if ($Matches.sign -and $Matches.number.StartsWith('-')) { return $null }
-    $number = $Matches.sign+$Matches.number.Replace(',','')
+    if ($value -match '^(?<sign>-?)\s*(?:US\s*\$|\$|USD)\s*(?<number>.+)$') {
+        $value = $Matches.sign+$Matches.number
+    } elseif ($value -match '^(?<number>.+?)\s*(?:USD|US\s*\$|\$)$') {
+        $value = $Matches.number.Trim()
+    } else { return $null }
+    if ($value -match '^-?\d{1,3}(?: \d{3})+(?:[.,]\d{1,6})?$') {
+        $value = $value.Replace(' ','').Replace(',','.')
+    } elseif ($value -match '^-?\d{1,3}(?:,\d{3})+(?:\.\d{1,6})?$') {
+        $value = $value.Replace(',','')
+    } elseif ($value -match '^-?\d{1,3}(?:\.\d{3})+,\d{1,6}$') {
+        $value = $value.Replace('.','').Replace(',','.')
+    } elseif ($value -match '^-?\d+,\d{1,2}$') {
+        $value = $value.Replace(',','.')
+    }
+    if ($value -notmatch '^-?\d+(?:\.\d{1,6})?$') { return $null }
     $amount = [decimal]0
-    if (-not [decimal]::TryParse($number,[Globalization.NumberStyles]::Number,
+    if (-not [decimal]::TryParse($value,[Globalization.NumberStyles]::Number,
             [Globalization.CultureInfo]::InvariantCulture,[ref]$amount)) { return $null }
     if ($amount -gt 100000000 -or $amount -lt -1000000 -or ($Provider -eq 'opencode' -and $amount -lt 0)) { return $null }
     return $amount
@@ -99,42 +119,73 @@ function Get-UsdAmount {
 
 function Test-BillingBalance {
     param($Document)
-    $labels = '^(?:credit balance|prepaid balance|available credits?|current balance|available balance)'
-    if ($Provider -eq 'opencode') { $labels = '^(?:credit balance|prepaid balance|available credits?|current balance|available balance|balance|credits)' }
-    $textCondition = New-Object System.Windows.Automation.PropertyCondition(
+    # Localized labels are Unicode escapes to keep the helper compatible with
+    # Windows PowerShell 5.1's default script encoding.
+    $specific = '^(?:(?:current |available |remaining )?credit balance|prepaid (?:credit )?balance|available credits?|remaining credits?|credits? remaining|prepaid credits?|current balance|available balance|credit remaining|\u0431\u0430\u043b\u0430\u043d\u0441 \u043a\u0440\u0435\u0434\u0438\u0442\u043e\u0432|\u043e\u0441\u0442\u0430\u0442\u043e\u043a \u043a\u0440\u0435\u0434\u0438\u0442\u043e\u0432|\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0435 \u043a\u0440\u0435\u0434\u0438\u0442\u044b|\u043a\u0440\u0435\u0434\u0438\u0442\u043d\u044b\u0439 \u0431\u0430\u043b\u0430\u043d\u0441|\u0442\u0435\u043a\u0443\u0449\u0438\u0439 \u0431\u0430\u043b\u0430\u043d\u0441|\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0439 \u0431\u0430\u043b\u0430\u043d\u0441)(?:\s*\(USD\))?(?=$|\s|[:\uFF1A])'
+    $generic = '^(?:credits|balance|\u043a\u0440\u0435\u0434\u0438\u0442\u044b|\u0431\u0430\u043b\u0430\u043d\u0441)(?:\s*\(USD\))?(?=$|\s|[:\uFF1A])'
+    $textCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Text)
     $items = $Document.FindAll([System.Windows.Automation.TreeScope]::Descendants,$textCondition)
     if ($items.Count -gt 1500) { return $false }
-    $values = New-Object 'System.Collections.Generic.HashSet[decimal]'
+    $specificValues = New-Object 'System.Collections.Generic.HashSet[decimal]'
+    $genericValues = New-Object 'System.Collections.Generic.HashSet[decimal]'
+    $seenSpecific = $false
     $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
     foreach ($item in $items) {
         if ($item.Current.IsOffscreen -or $item.Current.IsPassword) { continue }
-        $name = ([string]$item.Current.Name).Trim()
-        if ($name.Length -gt 120 -or $name -notmatch $labels) { continue }
-        $match = [regex]::Match($name,$labels,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        $tail = $name.Substring($match.Length).Trim().TrimStart(':').Trim()
+        $name = (([string]$item.Current.Name) -replace '\s+',' ').Trim()
+        if (-not $name -or $name.Length -gt 160) { continue }
+        $match = [regex]::Match($name,$specific,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $isSpecific = $match.Success
+        if (-not $isSpecific -and $Provider -eq 'opencode') {
+            $match = [regex]::Match($name,$generic,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+        if (-not $match.Success) { continue }
+        $tail = $name.Substring($match.Length).Trim().TrimStart([char[]]@(':',[char]0xFF1A)).Trim()
+        # A longer unrelated phrase such as "Balance top-up" isn't a label.
+        if ($tail -and $tail -notmatch '^(?:-?\s*(?:US\s*\$|\$|USD)|-?\s*\d)') { continue }
+        $values = if ($isSpecific) { ,$specificValues } else { ,$genericValues }
+        if ($isSpecific) { $seenSpecific=$true }
         if ($tail) {
             $amount = Get-UsdAmount $tail
             if ($null -ne $amount) { [void]$values.Add($amount) }
             continue
         }
-        # Only adjacent accessible text, never a full document dump.
-        $parent = $walker.GetParent($item)
-        $candidates = @($walker.GetNextSibling($item))
-        if ($parent -and -not $parent.Equals($Document)) { $candidates += $walker.GetNextSibling($parent) }
-        foreach ($candidate in $candidates) {
-            if (-not $candidate -or $candidate.Current.IsOffscreen -or $candidate.Current.IsPassword) { continue }
-            if ($candidate.Current.ControlType -ne [System.Windows.Automation.ControlType]::Text) { continue }
-            $amount = Get-UsdAmount ([string]$candidate.Current.Name)
-            if ($null -ne $amount) { [void]$values.Add($amount); break }
+        # Only adjacent text or a small adjacent accessible wrapper, never
+        # all text on the document or a password field.
+        $node = $item
+        for ($depth=0;$depth -lt 4 -and $node -and -not $node.Equals($Document);$depth++) {
+            $candidate = $walker.GetNextSibling($node)
+            if ($candidate -and -not $candidate.Current.IsOffscreen -and -not $candidate.Current.IsPassword) {
+                $candidateText = ([string]$candidate.Current.Name).Trim()
+                if ($candidateText) {
+                    $amount = Get-UsdAmount $candidateText
+                    if ($null -ne $amount) { [void]$values.Add($amount) }
+                } elseif ($candidate.Current.ControlType -in @([System.Windows.Automation.ControlType]::Group,[System.Windows.Automation.ControlType]::Pane)) {
+                    $children = $candidate.FindAll([System.Windows.Automation.TreeScope]::Children,$textCondition)
+                    if ($children.Count -le 3) {
+                        $parts = @($children | Where-Object { -not $_.Current.IsOffscreen -and -not $_.Current.IsPassword } | ForEach-Object { [string]$_.Current.Name })
+                        $amount = Get-UsdAmount ($parts -join ' ')
+                        if ($null -ne $amount) { [void]$values.Add($amount) }
+                    }
+                }
+            }
+            $parent = $walker.GetParent($node)
+            if (-not $parent -or $parent.Equals($Document) -or $parent.Current.IsPassword) { break }
+            # Do not walk out of a label wrapper containing unrelated text.
+            $parentName = (([string]$parent.Current.Name) -replace '\s+',' ').Trim()
+            if ($parentName -and $parentName -ne $name) { break }
+            $node=$parent
         }
     }
-    return ($values.Count -eq 1)
+    if ($seenSpecific) { return ($specificValues.Count -eq 1) }
+    return ($genericValues.Count -eq 1)
 }
 
 function Get-BillingWindow {
-    $pidCondition = New-Object System.Windows.Automation.PropertyCondition(
+    $script:ProbeReason = 'window'
+    $pidCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ProcessIdProperty,$BrowserProcessId)
     $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
         [System.Windows.Automation.TreeScope]::Children,$pidCondition)
@@ -149,22 +200,36 @@ function Get-BillingWindow {
     })
     if ($visibleWindows.Count -ne 1 -or -not $visibleWindows[0].Equals($window)) { return $null }
     if (-not $window.Current.NativeWindowHandle) { return $null }
-    $docCondition = New-Object System.Windows.Automation.PropertyCondition(
+    $script:ProbeReason = 'document'
+    $docCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Document)
     $docs = @($window.FindAll([System.Windows.Automation.TreeScope]::Descendants,$docCondition) |
         Where-Object { -not $_.Current.IsOffscreen })
-    # Multiple visible documents/frames are intentionally ambiguous.
-    if ($docs.Count -ne 1) { return $null }
-    $document = $docs[0]
+    # Ignore nested frame documents. Multiple independent top-level web
+    # documents are still ambiguous and must not trigger a close.
+    $rawWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+    $topDocs = @()
+    foreach ($doc in $docs) {
+        $ancestor = $rawWalker.GetParent($doc); $nested=$false; $reached=$false
+        for ($i=0;$i -lt 80 -and $ancestor;$i++) {
+            if ($ancestor.Equals($window)) { $reached=$true; break }
+            if ($ancestor.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { $nested=$true; break }
+            $ancestor=$rawWalker.GetParent($ancestor)
+        }
+        if (-not $nested -and $reached) { $topDocs += $doc }
+    }
+    if ($topDocs.Count -ne 1) { return $null }
+    $document = $topDocs[0]
     $url = Get-DocumentUrl $document
     if (-not $url) { return $null }
-    $tabCondition = New-Object System.Windows.Automation.PropertyCondition(
+    $script:ProbeReason = 'tabs'
+    $tabCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::TabItem)
     $tabs = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,$tabCondition)
     $browserTabs = @()
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
     foreach ($tab in $tabs) {
         # Ignore tab controls inside the Billing document, but include hidden
         # browser tabs so that we never close a window containing other tabs.
@@ -182,6 +247,7 @@ function Get-BillingWindow {
     $selected = $null
     if (-not $browserTabs[0].TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$selected) -or
         -not $selected.Current.IsSelected) { return $null }
+    $script:ProbeReason = 'balance'
     if (-not (Test-BillingBalance $document)) { return $null }
     return [pscustomobject]@{Element=$window;Url=$url;Handle=[int]$window.Current.NativeWindowHandle}
 }
@@ -213,10 +279,10 @@ namespace UsageDashboard {
     }
 }
 '@
-    if (-not (Test-OwnedProcess)) { Write-Result 'unavailable'; exit 0 }
+    if (-not (Test-OwnedProcess)) { Write-Result 'unavailable' -Reason 'window'; exit 0 }
     Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,WindowsBase
     $result = Get-BillingWindow
-    if (-not $result) { Write-Result 'not_ready'; exit 0 }
+    if (-not $result) { Write-Result 'not_ready' -Reason $script:ProbeReason; exit 0 }
     if ($ExpectedUrl -and $ExpectedWindow -ne 0 -and
         $result.Url -ceq (Get-CanonicalBillingUrl $ExpectedUrl) -and $result.Handle -eq $ExpectedWindow) {
         # Recheck ownership and freshly sampled document/handle before asking
@@ -225,7 +291,7 @@ namespace UsageDashboard {
         $fresh = Get-BillingWindow
         if (-not $fresh -or $fresh.Handle -ne $result.Handle -or $fresh.Url -cne $result.Url -or
             $fresh.Element.Current.ProcessId -ne $BrowserProcessId) {
-            Write-Result 'not_ready'; exit 0
+            Write-Result 'not_ready' -Reason $script:ProbeReason; exit 0
         }
         $close = $null
         if (-not $fresh.Element.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern,[ref]$close)) {

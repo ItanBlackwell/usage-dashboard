@@ -41,8 +41,10 @@ and the potential impact. Redact all secrets and private account data.
   and explicit balance, and rechecks the window and ownership before invoking
   WindowPattern.Close. No keyboard/mouse injection, forced browser termination,
   global browser inspection or sign-in interaction is performed. If evidence
-  is insufficient, the window stays open. The helper is invoked without a
-  shell, with a restricted environment and bounded execution time.
+  is insufficient, the window stays open. Only the dedicated browser receives
+  Chromium's standard accessibility-mode flag. The helper is invoked without a
+  shell, with a restricted environment and bounded execution time. Diagnostics
+  expose fixed reason codes, never raw accessibility text or browser output.
 - Browser selection reads the current user's HTTPS association without changing
   it. Only recognized browser identifiers and executable basenames are accepted.
   A local executable may be located through known installation directories or

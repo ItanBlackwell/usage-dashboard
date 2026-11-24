@@ -113,8 +113,22 @@ Desktop version. Main-process diagnostics record only fixed command outcomes.
   The helper revalidates the evidence before requesting the standard Windows
   UI Automation window close. Browser builds that do not expose the necessary
   accessibility information, multiple windows/tabs, a modal dialog or a
-  minimized window can prevent closure. In these cases close the dedicated
-  windows manually. The plugin never forcibly terminates the login browser.
+  minimized window can prevent closure. The dedicated browser starts with
+  Chromium's standard accessibility mode enabled, without a debugger or
+  automated authentication. In unsupported cases close the dedicated window
+  manually. The plugin never forcibly terminates the login browser.
+- Window diagnostics identify the failed check: W01 (window ownership or
+  uniqueness), W02 (accessible Billing document), W03 (single selected tab),
+  W04 (visible balance), W05 (accessibility helper unavailable).
+- The background reader allows up to 30 seconds for the balance to appear
+  after navigation. It recognizes explicit English and Russian credit-balance
+  labels, adjacent or nested amounts, explicit USD currency markers, fractional
+  credits and supported localized number formats. It does not substitute
+  spending limits or arbitrary dollar amounts for credit balance.
+- Background diagnostics identify the failed check: R01 (balance label not
+  found), R02 (USD amount not recognized), R03 (conflicting amounts), R04
+  (document read failed), R05 (navigation failed). If reporting an issue,
+  include the code and provider name, not account details or raw page content.
 - Connection completes automatically after the browser exits. It retries
   briefly if navigation data is still being saved or the profile is locked.
   If automatic closure was requested, the discovered Billing page must match

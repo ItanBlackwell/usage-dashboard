@@ -220,6 +220,12 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
     choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
     awaiting_login:tr('Sign in and open Billing for this API account. The dedicated window closes automatically when the balance is recognized; otherwise close it yourself.','Войди и открой Billing нужного API-аккаунта. После распознавания баланса отдельное окно закроется автоматически; иначе закрой его вручную.'),
+    awaiting_login_window:tr('Waiting for the dedicated browser window [W01]. You can close it manually.','Не удалось однозначно определить отдельное окно [W01]. Можно закрыть его вручную.'),
+    awaiting_login_document:tr('Waiting for an accessible Billing document [W02].','Ожидаем доступную страницу Billing [W02].'),
+    awaiting_login_tabs:tr('Auto-close requires one selected browser tab [W03]. Close other tabs or the dedicated window.','Для автозакрытия нужна одна открытая вкладка [W03]. Закрой лишние вкладки или отдельное окно.'),
+    awaiting_login_balance:tr('Waiting for a readable Billing balance [W04].','Ожидаем распознавания баланса в окне Billing [W04].'),
+    awaiting_login_ready:tr('Billing page and balance recognized; closing the dedicated window…','Страница и баланс распознаны; закрываем отдельное окно…'),
+    awaiting_login_helper:tr('Window accessibility is unavailable [W05]. Close the dedicated window manually after sign-in.','Не удалось получить данные доступности окна [W05]. После входа закрой отдельное окно вручную.'),
     checking_billing:tr('Connecting Billing automatically…','Автоматически подключаем Billing…'),
     awaiting_confirmation:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
     page_detected:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
@@ -232,6 +238,11 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     stale:tr('Last confirmed balance','Последний подтверждённый баланс'),
     login_required:tr('Sign-in required. Reconnect in the normal browser.','Требуется вход. Переподключи Billing в обычном браузере.'),
     balance_unavailable:tr('Billing balance unavailable','Баланс Billing недоступен'),
+    billing_label_missing:tr('Billing page loaded, but the credit balance label was not found [R01].','Страница Billing открылась, но подпись баланса не найдена [R01].'),
+    billing_value_missing:tr('Balance label found, but its USD amount could not be read [R02].','Подпись баланса найдена, но сумма USD не распознана [R02].'),
+    billing_value_ambiguous:tr('Several different credit balances found [R03].','Найдено несколько разных значений баланса [R03].'),
+    billing_read_failed:tr('Could not read the Billing document [R04].','Не удалось прочитать страницу Billing [R04].'),
+    billing_navigation_failed:tr('The background browser could not load Billing [R05].','Фоновый браузер не смог загрузить Billing [R05].'),
     runtime_missing:tr('Billing runtime missing. Reinstall the plugin.','Нет модуля Billing. Переустанови плагин.'),
     browser_missing:tr('No compatible installed Chromium browser found.','Не найден совместимый установленный Chromium-браузер.'),
     browser_error:tr('Could not launch Billing browser.','Не удалось запустить браузер Billing.'),
@@ -260,7 +271,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   line.setAttribute('data-pv-billing-session',status||'disconnected');
   const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
   const browserName=billing.BROWSERS[session?.browser]?.name;
-  const waiting=status==='awaiting_login';
+  const waiting=typeof status==='string'&&status.startsWith('awaiting_login');
   const busy=pending||status==='connecting'||status==='checking_billing';
   const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
   if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback+(browserName&&!choosing?' · '+browserName:'')));
