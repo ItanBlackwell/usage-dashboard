@@ -9,7 +9,21 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null});
+const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null,billingSessions:[]});
+const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','profile_error','disconnect_error']);
+function sanitizeBillingSessions(value,accounts) {
+  if(!Array.isArray(value))return [];
+  const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
+  const result=new Map();
+  for(const s of value.slice(0,80)){
+    if(!s||typeof s.id!=='string'||eligible.get(s.id)!==s.provider||!BILLING_STATES.has(s.state))continue;
+    const valid=typeof s.amount==='number'&&Number.isFinite(s.amount)&&s.amount>=(s.provider==='opencode'?0:-1000000)&&s.amount<=100000000;
+    const amount=valid&&['ok','stale','login_required','balance_unavailable','browser_missing','browser_error','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
+    const checkedAt=amount!==null&&Number.isFinite(s.checkedAt)&&s.checkedAt>0?s.checkedAt:0;
+    result.set(s.id,{id:s.id,provider:s.provider,state:s.state,amount:checkedAt?amount:null,checkedAt});
+  }
+  return [...result.values()];
+}
 const readInterval = (value, fallback=5) => Number.isInteger(value) && value>=1 && value<=120 ? value : fallback;
 function cacheDirectory(env=process.env,home=os.homedir()) {
   return path.join(env.LOCALAPPDATA || path.join(home,'.cache'), 'usage-dashboard');
@@ -55,6 +69,7 @@ function sanitizeSnapshot(value) {
       && typeof b.observedAt==='number' && Number.isFinite(b.observedAt))
       result[field]={usd:b.usd,currency:'USD',observedAt:b.observedAt,source:'billing-page'};
   }
+  result.billingSessions=sanitizeBillingSessions(value.billingSessions,result.accounts);
   return result;
 }
 function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,clock=Date.now,intervalMinutes=5,onChange=()=>{}}={}) {
@@ -108,7 +123,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance,zenBrowserBalance:previous.zenBrowserBalance});
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance,zenBrowserBalance:previous.zenBrowserBalance,billingSessions:previous.billingSessions});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -125,6 +140,13 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     inform();
     await write();
     return snapshot;
+  };
+  const setBillingSession=async(id,provider,session)=>{
+    await init();
+    if(!snapshot.accounts.some(a=>a.id===id&&a.provider===provider&&a.kind==='api'&&a.message!=='login_required'))return sanitizeSnapshot(snapshot);
+    const remaining=snapshot.billingSessions.filter(s=>s.id!==id);
+    snapshot=sanitizeSnapshot({...snapshot,billingSessions:session?[...remaining,{...session,id,provider}]:remaining});
+    inform();await write();return sanitizeSnapshot(snapshot);
   };
   // The server acknowledged activation. Update only the public active flags
   // immediately; quota refresh happens separately without blocking the popup.
@@ -173,6 +195,6 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     timer=setInterval(()=>void refresh(true),interval);timer.unref?.();
   };
   const stop=()=>{if(timer)clearInterval(timer);};
-  return {cached,refresh,receiveBalance,markActive,syncActive,start,stop};
+  return {cached,refresh,receiveBalance,setBillingSession,markActive,syncActive,start,stop};
 }
 module.exports={EMPTY,readInterval,sanitizeSnapshot,cacheDirectory,persistentMonitor};

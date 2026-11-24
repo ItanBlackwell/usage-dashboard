@@ -87,6 +87,15 @@ function browserBalanceFor(account,snapshot) {
   const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
   return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
 }
+function billingSessionFor(account,snapshot) {
+  if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
+  return (snapshot?.billingSessions||[]).find(s=>s.id===account.id&&s.provider===account.provider)||null;
+}
+function accountBrowserBalance(account,snapshot) {
+  const s=billingSessionFor(account,snapshot);
+  if(s)return Number.isFinite(s.amount)?{usd:s.amount,currency:'USD',observedAt:s.checkedAt,source:'billing-session',state:s.state}:null;
+  return browserBalanceFor(account,snapshot);
+}
 // Inventory-only metadata is not a new balance measurement. Retain previously
 // confirmed values only for the identical account while IPC is unavailable.
 function mergeInventoryFallback(inventory,previous) {
@@ -101,7 +110,12 @@ function mergeInventoryFallback(inventory,previous) {
     return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
       credits:p.credits,checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={...inventory,accounts,browserBalance:null,zenBrowserBalance:null};
+  const merged={...inventory,accounts,browserBalance:null,zenBrowserBalance:null,
+    billingSessions:accounts.flatMap(a=>{
+      const p=byId.get(a.id),s=billingSessionFor(a,previous);
+      return p&&p.provider===a.provider&&p.kind===a.kind&&p.source===a.source&&p.message!=='login_required'&&s
+        ?[{...s,state:Number.isFinite(s.amount)?'stale':s.state}]:[];
+    })};
   for(const [provider,field] of [['codex','browserBalance'],['opencode','zenBrowserBalance']]){
     const keys=connectedApiKeys(merged).filter(a=>a.provider===provider);
     const oldKeys=connectedApiKeys(previous).filter(a=>a.provider===provider);
@@ -123,7 +137,7 @@ function indicatorPresentation(account,snapshot) {
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
     // Billing credit is organization-wide: only attach it if exactly one
     // OpenAI API account exists. Never attribute it to two unrelated keys.
-    const amount=browserBalanceFor(account,snapshot)?.usd??null;
+    const amount=accountBrowserBalance(account,snapshot)?.usd??null;
     return {mode:'api',amount,currency:'USD'};
   }
   const windows=indicatorWindows(account);
@@ -136,5 +150,5 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,formatCurrency,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,billingSessionFor,accountBrowserBalance,formatCurrency,mergeInventoryFallback };
 

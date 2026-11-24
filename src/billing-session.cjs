@@ -120,7 +120,11 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   const folder=account=>path.join(directory,crypto.createHash('sha256').update(account.provider+':'+account.id).digest('hex'));
   const bindingFile=account=>path.join(folder(account),'binding.json');
   const profile= (account,channel)=>path.join(folder(account),channel);
-  const current=async id=>(await store.cached()).accounts.find(a=>a.id===id&&eligible(a))||null;
+  const current=async id=>{
+    const snapshot=await store.cached();
+    if(snapshot.inventoryWarning)return null;
+    return snapshot.accounts.find(a=>a.id===id&&eligible(a))||null;
+  };
   const stateFor=(snapshot,id,provider)=>snapshot.billingSessions?.find(s=>s.id===id&&s.provider===provider);
   async function publish(account,state,{amount=null,checkedAt=0,preserve=false}={}){
     if(stopped)return store.cached();
@@ -146,8 +150,8 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   }
   async function closeContext(context){
     if(!context)return;
-    try{await bounded(context.close(),10000);}catch{throw new Error('browser_error');}
-    finally{contexts.delete(context);}
+    try{await bounded(context.close(),10000);contexts.delete(context);}
+    catch{throw new Error('browser_error');}
   }
   async function launch(account,browser,headless){
     let chromium;
@@ -224,9 +228,10 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       const result=await readPage(record.context,account,null,4000);
       if(result.state!=='ok'||interactive.get(account.id)!==record)return publish(account,'confirmation_unavailable');
       if(!await current(account.id))throw new Error('profile_error');
-      await saveBinding(account,{channel:record.channel,url:result.url});
       interactive.delete(account.id);
       await closeContext(record.context);
+      if(!await current(account.id))throw new Error('profile_error');
+      await saveBinding(account,{channel:record.channel,url:result.url});
       return publish(account,'ok',{amount:result.amount,checkedAt:clock()});
     }catch(e){return publish(account,safeError(e));}
   }
@@ -245,6 +250,8 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }
   }
   async function refreshAccount(account){
+    const initialState=stateFor(await store.cached(),account.id,account.provider);
+    if(initialState?.state==='disconnect_error')return;
     const binding=await readBinding(account);
     if(!binding){
       const state=stateFor(await store.cached(),account.id,account.provider);
@@ -260,20 +267,26 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       const page=context.pages()[0]||await context.newPage();
       await page.goto(binding.url,{waitUntil:'domcontentloaded',timeout:15000});
       const result=await readPage(context,account,binding.url);
+      if(!await current(account.id))return;
       if(result.state==='ok')await publish(account,'ok',{amount:result.amount,checkedAt:clock()});
       else await publish(account,result.state,{preserve:true});
     }catch(e){await publish(account,safeError(e),{preserve:true});}
     finally{if(context)await closeContext(context).catch(()=>{});}
   }
-  function run(account,fn){
-    if(stopped||busy.has(account.id))return store.cached();
-    const task=Promise.resolve().then(fn).finally(()=>busy.delete(account.id));
+  function run(account,fn,queue=false){
+    if(stopped)return store.cached();
+    const previous=busy.get(account.id);
+    if(previous&&!queue)return store.cached();
+    const task=Promise.resolve(previous).catch(()=>{}).then(async()=>{
+      if(stopped||!await current(account.id))return store.cached();
+      return fn();
+    }).finally(()=>{if(busy.get(account.id)===task)busy.delete(account.id);});
     busy.set(account.id,task);return task;
   }
   async function action(id,verb){
     const account=await current(id);
     if(!account||!['open','confirm','disconnect'].includes(verb)||stopped)return store.cached();
-    return run(account,()=>verb==='open'?open(account):verb==='confirm'?confirm(account):disconnect(account));
+    return run(account,()=>verb==='open'?open(account):verb==='confirm'?confirm(account):disconnect(account),true);
   }
   async function tick(){
     if(stopped||tickBusy)return;
@@ -282,6 +295,12 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       const snapshot=await store.cached();
       // Do not poll removed accounts or an inventory known to be incomplete.
       if(snapshot.inventoryWarning)return;
+      const connected=new Set(snapshot.accounts.filter(eligible).map(a=>a.id));
+      for(const [id,record] of interactive){
+        if(connected.has(id))continue;
+        interactive.delete(id);
+        await closeContext(record.context).catch(()=>{});
+      }
       for(const account of snapshot.accounts.filter(eligible)){
         if(stopped)break;
         if(interactive.has(account.id)||busy.has(account.id))continue;
