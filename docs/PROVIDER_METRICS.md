@@ -80,13 +80,18 @@ fields. Money amounts retain their currency.
 
 ## Display and privacy
 
-The card displays provider spending and usage counters directly, including
-key spending by period, organization usage, and available token or request
-counts. More metrics expands secondary rows. Small positive expenses retain
-sub-cent precision. Availability messages remain visible.
+The compact card shows a confirmed wallet balance, remaining subscription
+quota bars and known limits. If no wallet is available, an accessible budget
+is explicitly distinguished from the wallet. Free-model quotas remain visible.
+**Statistics & details** is collapsed by default and contains spending by
+period, organization usage, tokens, requests, additional policies, model
+counters and detailed availability reasons. Small positive expenses retain
+sub-cent precision. Unavailable primary metrics and stale API readings are
+identified in the compact view. Expanded sections retain their state during
+refreshes within the current Desktop window.
 
 When an API wallet or general spending cap, or a subscription quota, is
-unavailable, a separate local usage block shows today's and the current month's
+unavailable, a separate collapsed local usage section shows today's and the current month's
 recorded model cost, tokens and steps by provider (UTC). It uses the host's
 [experimental session statistics API](https://opencode.ai/docs/api)
 (`experimental.session.stats`, `tools: none`) with two bounded read-only

@@ -205,7 +205,7 @@ function accountHeader(ctx,card,account,onSwitch,switchingID,api=false,summary=n
     b.addEventListener('click',()=>onSwitch(account.id));
   }
 }
-function renderProviderDetails(ctx,card,account){
+function renderProviderDetails(ctx,card,account,consoleRenderer=null){
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru'),tr=(en,rus)=>ru?rus:en;
   const labels={
     topped_up:tr('Top-up funds','Пополнения'),granted:tr('Granted funds','Бонусы'),cash:tr('Cash balance','Денежные средства'),voucher:tr('Vouchers','Ваучеры'),
@@ -269,10 +269,29 @@ function renderProviderDetails(ctx,card,account){
   if(account.state==='stale')notices.unshift({group:'usage',status:'stale'});
   const style='font-size:9.5px;line-height:1.25;color:'+palette.muted;
   const list=add(card,$('div','display:flex;flex-direction:column;gap:2px;min-width:0;margin-top:3px'));
+  const box=$('div','display:flex;flex-direction:column;gap:2px;padding-top:3px;min-width:0');
+  // A wallet is the primary monetary metric. Only known limits can replace
+  // it in the compact view; detailed spending and diagnostics stay collapsed.
+  const budget=presentation.openRouterBudget(account)||presentation.tightestGeneralBudget(account);
+  const validConsoleBudgets=(account.budgets||[]).filter(b=>Number.isFinite(b.remainingUsd)&&b.resetsAt>Date.now());
+  if(account.kind==='api'&&!hasBalance&&!budget&&!validConsoleBudgets.length){
+    add(list,$('span',style,tr('Balance unavailable','Баланс недоступен')));
+  }
+  if(account.kind==='api'&&account.state==='stale')add(list,$('span',style,tr('Last known reading','Последние известные данные')));
   const row=(parent,label,value,tip='')=>{
     const r=add(parent,$('div','display:flex;align-items:baseline;justify-content:space-between;gap:5px;min-width:0;'+style));
     const name=add(r,$('span','min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',label));
     add(r,$('span','flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums',value));r.title=tip||label;name.title=r.title;
+    return r;
+  };
+  const limitBar=(parent,label,remaining,limit)=>{
+    if(!Number.isFinite(remaining)||!Number.isFinite(limit)||remaining<0||limit<0||remaining>limit)return;
+    const percent=limit>0?100*remaining/limit:0;
+    const track=add(parent,$('div','height:3px;border-radius:2px;background:'+palette.track+';overflow:hidden'));
+    const fill=add(track,$('div','height:100%;width:'+percent+'%;background:'+(remaining>0?palette.success:palette.danger)));
+    fill.setAttribute('data-pv-remaining-bar','true');
+    fill.setAttribute('role','progressbar');fill.setAttribute('aria-label',label);
+    fill.setAttribute('aria-valuemin','0');fill.setAttribute('aria-valuemax','100');fill.setAttribute('aria-valuenow',String(percent));
   };
   const date=v=>{try{return Number.isFinite(v)?new Intl.DateTimeFormat(ru?'ru-RU':undefined,{dateStyle:'short',timeStyle:'short'}).format(new Date(v)):'—';}catch{return '—';}};
   if(account.keyBudget){
@@ -285,7 +304,7 @@ function renderProviderDetails(ctx,card,account){
     const showPolicy=(policy,isEffective=false)=>{
       const remaining=expired||policy.resetsAt&&policy.resetsAt<=now?null:policy.remaining;
       const title=scopes[policy.scope]||tr('Budget','Бюджет');
-      row(list,(isEffective?tr('Effective: ','Основной: '):'')+title,money(remaining)+' / '+money(policy.limit),
+      row(box,(isEffective?tr('Effective: ','Основной: '):'')+title,money(remaining)+' / '+money(policy.limit),
         title+' · '+(periods[policy.period]||'—')+'\n'+tr('Spent: ','Расход: ')+money(remaining===null?null:policy.spent)+'\n'+tr('Resets: ','Сброс: ')+date(policy.resetsAt)+'\n'+tr('BYOK included: ','BYOK учитывается: ')+(policy.includeByok?tr('Yes','Да'):tr('No','Нет')));
     };
     if(k.effective)showPolicy(k.effective,true);
@@ -298,14 +317,22 @@ function renderProviderDetails(ctx,card,account){
     }
     if(Number.isFinite(k.limit)&&!(k.policies||[]).some(b=>b.scope==='key_limit')&&k.effective?.scope!=='key_limit'){
       const period={daily:tr('daily','день'),weekly:tr('weekly','неделя'),monthly:tr('monthly','месяц'),none:tr('no reset','без сброса')}[k.period]||'—';
-      row(list,tr('Key cap','Бюджет ключа')+' · '+period,money(expired||reset?null:k.remaining)+' / '+money(k.limit),
+      row(box,tr('Key cap','Бюджет ключа')+' · '+period,money(expired||reset?null:k.remaining)+' / '+money(k.limit),
         tr('Key spending cap, not wallet money','Лимит расходов ключа, не баланс')+'\n'+tr('Resets: ','Сброс: ')+date(k.resetsAt));
     }
-    if(Number.isFinite(k.expiresAt))row(list,tr('Key expires','Ключ истекает'),date(k.expiresAt));
+    const effective=presentation.openRouterBudget(account,now);
+    if(!hasBalance&&effective){
+      const label=scopes[effective.scope]||tr('Spending cap','Бюджет расходов');
+      row(list,label,money(effective.remaining)+' / '+money(effective.limit),tr('Spending budget remaining, not wallet balance','Остаток бюджета расходов, не баланс')+'\n'+tr('Resets: ','Сброс: ')+date(effective.resetsAt));
+      limitBar(list,label,effective.remaining,effective.limit);
+    }
+    if(Number.isFinite(k.expiresAt))row(box,tr('Key expires','Ключ истекает'),date(k.expiresAt));
     if(k.freeDaily){
       const q=k.freeDaily,remaining=expired||q.resetsAt<=now?null:q.remaining;
-      row(list,tr('Free models · daily','Бесплатные модели · день'),(remaining===null?'—':remaining.toLocaleString(ru?'ru-RU':'en-US'))+' / '+q.limit.toLocaleString(ru?'ru-RU':'en-US'),
+      const parent=remaining===null?box:list,label=tr('Free models · daily','Бесплатные модели · день');
+      row(parent,label,(remaining===null?'—':remaining.toLocaleString(ru?'ru-RU':'en-US'))+' / '+q.limit.toLocaleString(ru?'ru-RU':'en-US'),
         tr('Daily free-model counter; exemptions and BYOK may not be subject to this ceiling.','Дневной счётчик бесплатных моделей; исключения и BYOK могут не ограничиваться этой квотой.')+'\n'+tr('Used: ','Использовано: ')+(remaining===null?'—':q.used)+'\n'+tr('Resets: ','Сброс: ')+date(q.resetsAt));
+      if(remaining!==null)limitBar(parent,label,remaining,q.limit);
     }
   }
   const renderMetric=(parent,m)=>{
@@ -316,36 +343,39 @@ function renderProviderDetails(ctx,card,account){
     const timeLabel=m.code.startsWith('org_')?tr('Data refreshed: ','Данные обновлены: '):tr('Expires: ','Истекает: ');
     row(parent,label+(m.model?' · '+m.model:''),amount,m.at?timeLabel+date(m.at):'');
   };
-  // Consumption remains actionable without a readable wallet or cap.
-  const primary=new Set(['topped_up','granted','cash','voucher','key_daily','key_weekly','key_monthly','key_total',
-    'wallet_total_usage','org_month_cost','org_month_tokens','org_month_requests','extra_balance','extra_month_used',
-    'extra_month_limit','tokens_24h','requests_24h','grant_used']);
-  for(const m of rows.filter(m=>primary.has(m.code)))renderMetric(list,m);
-  const rest=rows.filter(m=>!primary.has(m.code)),models=account.modelWindows||[];
-  if(rest.length||models.length||account.keyBudget?.includeByok!==null&&account.keyBudget?.includeByok!==undefined||account.keyBudget?.freeTier!==null&&account.keyBudget?.freeTier!==undefined){
-    const details=add(list,$('details','min-width:0;'+style));details.open=expandedAccountDetails.has(account.id);
-    const summary=add(details,$('summary','cursor:pointer;white-space:nowrap',tr('More metrics','Подробнее')));
-    details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(account.id);else expandedAccountDetails.delete(account.id);});
-    const box=add(details,$('div','display:flex;flex-direction:column;gap:2px;padding-top:2px'));
-    if(typeof account.keyBudget?.includeByok==='boolean')row(box,tr('BYOK included in cap','BYOK учитывается в лимите'),account.keyBudget.includeByok?tr('Yes','Да'):tr('No','Нет'));
-    if(typeof account.keyBudget?.freeTier==='boolean')row(box,tr('Free tier','Бесплатный тариф'),account.keyBudget.freeTier?tr('Yes','Да'):tr('No','Нет'));
-    for(const m of rest)renderMetric(box,m);
-    for(const w of models)row(box,w.model+' · '+displayWindow(ctx,w.label),pct(w.remainingPercent),tr('Resets: ','Сброс: ')+date(w.resetsAt));
+  if(account.provider==='opencode'&&consoleRenderer){
+    if(!hasBalance&&validConsoleBudgets.length){
+      consoleRenderer(ctx,list,{...account,budgets:validConsoleBudgets},box);
+      const other=(account.budgets||[]).filter(b=>!validConsoleBudgets.includes(b));
+      if(other.length)consoleRenderer(ctx,box,{...account,budgets:other},box);
+    }else consoleRenderer(ctx,box,account,box);
   }
-  // Combine equal reasons into a compact, visible line. Keep different
-  // failures separate so a missing wallet never hides a working quota.
+  if(typeof account.keyBudget?.includeByok==='boolean')row(box,tr('BYOK included in cap','BYOK учитывается в лимите'),account.keyBudget.includeByok?tr('Yes','Да'):tr('No','Нет'));
+  if(typeof account.keyBudget?.freeTier==='boolean')row(box,tr('Free tier','Бесплатный тариф'),account.keyBudget.freeTier?tr('Yes','Да'):tr('No','Нет'));
+  for(const m of rows)renderMetric(box,m);
+  for(const w of account.modelWindows||[])row(box,w.model+' · '+displayWindow(ctx,w.label),pct(w.remainingPercent),tr('Resets: ','Сброс: ')+date(w.resetsAt));
+  // Keep the precise availability reasons accessible without filling the card
+  // with repeated unsupported-metric messages.
   const grouped=new Map();
   for(const n of notices){
     if(!groups[n.group]||!reasons[n.status])continue;
     const names=grouped.get(n.status)||new Set();names.add(groups[n.group]);grouped.set(n.status,names);
   }
   for(const [status,names] of grouped){
-    const line=add(list,$('span',style,[...names].join(' / ')+': '+reasons[status]));
+    const line=add(box,$('span',style,[...names].join(' / ')+': '+reasons[status]));
     line.setAttribute('data-pv-metric-notice',status);
+  }
+  if(box.childNodes.length){
+    const details=add(list,$('details','min-width:0;'+style));
+    details.setAttribute('data-pv-account-details','true');
+    details.open=expandedAccountDetails.has(account.id);
+    add(details,$('summary','cursor:pointer;white-space:nowrap',tr('Statistics & details','Статистика и подробности')));
+    details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(account.id);else expandedAccountDetails.delete(account.id);});
+    add(details,box);
   }
   if(!list.childNodes.length)list.remove();
 }
-function renderConsoleBudgets(ctx,card,account){
+function renderConsoleBudgets(ctx,card,account,statisticsParent=card){
   if(account.provider!=='opencode')return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
   const tr=(en,rus)=>ru?rus:en;
@@ -382,8 +412,11 @@ function renderConsoleBudgets(ctx,card,account){
     try{reset=new Intl.DateTimeFormat(ru?'ru-RU':undefined,{dateStyle:'short',timeStyle:'short'}).format(new Date(budget.resetsAt));}catch{}
     row.title=[label,scope,tr('Spent: ','Расход: ')+money(expired?null:budget.spentUsd),tr('Resets: ','Сброс: ')+reset].join('\n');
     name.title=row.title;amount.title=row.title;
-    if(!expired&&Number.isFinite(budget.spentUsd))add(list,$('div','font-size:9.5px;color:'+palette.muted,
-      tr('Spent: ','Расход: ')+presentation.formatSpend(budget.spentUsd,'USD')));
+    if(!expired&&Number.isFinite(budget.spentUsd)){
+      const spend=add(statisticsParent,$('div','font-size:9.5px;color:'+palette.muted,
+        label+' · '+tr('Spent: ','Расход: ')+presentation.formatSpend(budget.spentUsd,'USD')));
+      spend.title=row.title;
+    }
     if(Number.isFinite(remaining)){
       const track=add(list,$('div','height:3px;border-radius:2px;background:'+palette.track+';overflow:hidden'));
       const fraction=budget.limitUsd>0?Math.min(1,Math.max(0,remaining/budget.limitUsd)):0;
@@ -396,9 +429,14 @@ function renderLocalUsage(ctx,parent,data,accounts){
   const now=Date.now(),providers=[...new Set(accounts.filter(a=>presentation.needsLocalUsage(a,now)).map(a=>a.provider))];
   if(!providers.length)return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru'),tr=(en,rus)=>ru?rus:en;
-  const card=compactCard(parent);
-  card.setAttribute('data-pv-local-usage','true');
-  add(card,$('strong','font-size:11px;color:'+palette.text,tr('OpenCode usage estimate','Оценка расхода OpenCode')));
+  const wrapper=compactCard(parent);
+  wrapper.setAttribute('data-pv-local-usage','true');
+  const details=add(wrapper,$('details','min-width:0;font-size:10px;color:'+palette.muted));
+  const expansionKey='local-usage'; // Account IDs contain a provider separator.
+  details.open=expandedAccountDetails.has(expansionKey);
+  add(details,$('summary','cursor:pointer;font-size:11px;color:'+palette.text,tr('OpenCode usage estimate','Оценка расхода OpenCode')));
+  details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(expansionKey);else expandedAccountDetails.delete(expansionKey);});
+  const card=add(details,$('div','min-width:0;padding-top:3px'));
   add(card,$('div','font-size:9.5px;line-height:1.25;color:'+palette.muted,
     tr('All local accounts · UTC · not provider charges','Все локальные аккаунты · UTC · не списания')));
   const periods=['today','month'].map(period=>[period,presentation.localUsagePeriod(data,period,now)]);
@@ -466,7 +504,8 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
       grid.setAttribute('data-pv-metrics-grid',hasBoth?'dual':'single');
       for(const win of ordered)progress(ctx,grid,win,hasBoth?'dual':'single');
     } else {
-      add(card,$('div',`color:${palette.muted};font-size:10px;margin-top:2px`,'—'));
+      const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
+      add(card,$('div',`color:${palette.muted};font-size:10px;margin-top:2px`,ru?'Общие лимиты недоступны':'General quotas unavailable'));
     }
     const footerItems=[];
     if(account.credits!==null)footerItems.push(`🪙 ${account.credits}`);
@@ -517,13 +556,12 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const extras=Array.isArray(account.balances)?account.balances.filter(b=>b && b.kind==='balance' && b.currency!==own?.currency && Number.isFinite(b.amount)):[];
     if(extras.length) add(card,$('div',`margin-top:2px;font-size:10px;color:${palette.muted};font-variant-numeric:tabular-nums`,
       extras.map(b=>currencyAmount(b.amount,b.currency)).join(' · ')));
-    renderConsoleBudgets(ctx,card,account);
-    renderProviderDetails(ctx,card,account);
     if(shownBudget){
       const lang=ctx.locale?.locale?.()||'en';
       const label=String(lang).startsWith('ru')?'Остаток бюджета расходов, не баланс':'Spending budget remaining, not wallet balance';
       const noteEl=add(card,$('span',`font-size:9.5px;color:${palette.muted}`,label));noteEl.setAttribute('data-pv-key-limit-label','true');
     }
+    renderProviderDetails(ctx,card,account,renderConsoleBudgets);
   }
   renderLocalUsage(ctx,list,data,all);
   // An organization monthly spend cap is NOT an API credit balance. Keep

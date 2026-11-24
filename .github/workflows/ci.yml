@@ -307,8 +307,8 @@ jobs:
             assert.deepEqual(cleanNotices([{group:'secret',status:'forbidden'},{group:'budget',status:'raw-response'}]),[]);
             const source=fs.readFileSync('src/gui-entry.cjs','utf8');
             // Run the actual provider-details renderer against a tiny DOM
-            // fixture. Availability notices must be visible children, not
-            // merely an amount tooltip.
+            // fixture. Detailed availability notices must remain in the
+            // disclosure, not merely an amount tooltip.
             const start=source.indexOf('function renderProviderDetails('),end=source.indexOf('function renderConsoleBudgets(',start);
             assert.ok(start>=0&&end>start);
             const el=(tag,style,text='')=>({tag,style,textContent:text,childNodes:[],attrs:{},setAttribute(k,v){this.attrs[k]=v;},addEventListener(){},remove(){this.removed=true;}});
@@ -318,10 +318,14 @@ jobs:
             render(ctx,root,unsupported);
             const all=n=>[n,...n.childNodes.flatMap(all)];
             assert.ok(all(root).some(n=>n.attrs['data-pv-metric-notice']==='unsupported'&&n.textContent.includes('не поддерживается')));
+            const disclosure=all(root).find(n=>n.tag==='details');
+            assert.equal(disclosure.open,false);
+            assert.ok(all(disclosure).some(n=>n.attrs['data-pv-metric-notice']==='unsupported'));
             const modernRoot=el('div','');render(ctx,modernRoot,cleanModern);
             assert.ok(all(modernRoot).some(n=>n.textContent.includes('Бюджет участника')));
             assert.ok(all(modernRoot).some(n=>n.textContent==='$10.00 / $50.00'));
             assert.ok(all(modernRoot).some(n=>n.textContent.includes('Бесплатные модели')));
+            assert.ok(all(modernRoot).some(n=>n.attrs['data-pv-remaining-bar']==='true'));
             assert.ok(!all(modernRoot).some(n=>n.textContent.includes('не задан')||n.textContent.includes('нет настроенных лимитов')));
             const deniedRoot=el('div','');render(ctx,deniedRoot,partial);
             assert.ok(all(deniedRoot).some(n=>n.attrs['data-pv-metric-notice']==='forbidden'&&n.textContent.includes('403')));
@@ -375,11 +379,14 @@ jobs:
             const add=(parent,child)=>(parent.childNodes.push(child),child);
             const all=n=>[n,...n.childNodes.flatMap(all)];
             const ctx={locale:{locale:()=> 'ru'}};
-            const local=new Function('$','add','palette','presentation','compactCard','providerLabel','note','Date',
+            const expanded=new Set();
+            const local=new Function('$','add','palette','presentation','compactCard','providerLabel','note','Date','expandedAccountDetails',
               source.slice(source.indexOf('function renderLocalUsage('),source.indexOf('function renderLimits('))+';return renderLocalUsage;')
-              (el,add,{text:'#fff',muted:'#888',border:'#444'},p,parent=>add(parent,el('div','')),x=>x,x=>el('span','',x),class extends Date{static now(){return now;}});
+              (el,add,{text:'#fff',muted:'#888',border:'#444'},p,parent=>add(parent,el('div','')),x=>x,x=>el('span','',x),class extends Date{static now(){return now;}},expanded);
             const root=el('div','');local(ctx,root,{localUsage:usage},[{kind:'api',provider:'codex'},{kind:'api',provider:'codex'},{kind:'api',provider:'gemini'},{kind:'api',provider:'qwen'}]);
-            assert.equal(all(root).filter(n=>n.textContent==='codex').length,1);
+            const localDetails=all(root).find(n=>n.tag==='details');
+            assert.equal(localDetails.open,false);
+            assert.equal(all(localDetails).filter(n=>n.textContent==='codex').length,1);
             assert.ok(all(root).some(n=>n.textContent==='≈ $0.005'));
             assert.ok(all(root).some(n=>n.textContent==='≈ $0.00'));
             assert.ok(all(root).some(n=>n.textContent==='Нет данных'));
@@ -387,10 +394,23 @@ jobs:
             const render=new Function('$','add','palette','money','currencyAmount','pct','displayWindow','expandedAccountDetails','presentation',
               source.slice(source.indexOf('function renderProviderDetails('),source.indexOf('function renderConsoleBudgets('))+';return renderProviderDetails;')
               (el,add,{muted:'#888'},v=>p.formatCurrency(v,'USD'),p.formatCurrency,n=>n+'%',(_,s)=>s,new Set(),p);
-            const remote=el('div','');render(ctx,remote,{kind:'api',provider:'openrouter',state:'ok',message:'ok',
+            const remote=el('div','');render(ctx,remote,{id:'openrouter:fixture',kind:'api',provider:'openrouter',state:'ok',message:'ok',
               metrics:[{code:'key_daily',currency:'USD',value:0.005},{code:'key_total',currency:'USD',value:2},{code:'byok_total',currency:'USD',value:1}],notices:[]});
-            assert.ok(remote.childNodes[0].childNodes.some(n=>n.tag!=='details'&&all(n).some(x=>x.textContent==='$0.005')));
-            assert.ok(remote.childNodes[0].childNodes.some(n=>n.tag!=='details'&&all(n).some(x=>x.textContent==='Расход ключа · всего')));
+            const visible=n=>[n,...(n.tag==='details'&&!n.open?n.childNodes.filter(x=>x.tag==='summary'):n.childNodes).flatMap(visible)];
+            const remoteDetails=all(remote).find(n=>n.tag==='details');
+            assert.equal(remoteDetails.open,false);
+            assert.ok(visible(remote).some(n=>n.textContent==='Баланс недоступен'));
+            assert.ok(!visible(remote).some(n=>n.textContent==='$0.005'||n.textContent==='Расход ключа · всего'));
+            assert.ok(all(remoteDetails).some(n=>n.textContent==='$0.005'));
+            remoteDetails.open=true;
+            assert.ok(visible(remote).some(n=>n.textContent==='Расход ключа · всего'));
+            assert.ok(!visible(root).some(n=>n.textContent==='≈ $0.005'));
+            localDetails.open=true;
+            assert.ok(visible(root).some(n=>n.textContent==='≈ $0.005'));
+            const wallet=el('div','');render(ctx,wallet,{id:'deepseek:fixture',kind:'api',provider:'deepseek',state:'ok',message:'ok',
+              balance:{kind:'balance',amount:0,currency:'USD'},metrics:[{code:'cash',currency:'USD',value:0},{code:'topped_up',currency:'USD',value:4}],notices:[]});
+            assert.ok(!visible(wallet).some(n=>n.textContent==='Баланс недоступен'||n.textContent==='$4.00'));
+            assert.ok(all(wallet).some(n=>n.textContent==='$4.00'));
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
       - name: Package and verify archives without test scripts or secrets

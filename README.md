@@ -81,14 +81,15 @@ See [OpenCode budgets and credits](docs/OPENCODE_BUDGETS.md).
 
 Usage Dashboard reuses existing provider connections. Wallet balances, key
 spending caps, organization analytics and subscription quotas remain distinct.
-Each connected account shows supported data and a visible explanation when a
-metric is unsupported, not returned, forbidden or temporarily unavailable.
-Provider spending counters are visible without expanding **More metrics**.
-When a wallet, general spending cap or subscription quota cannot be read, the
-popup also displays a separate local OpenCode usage estimate for today and the
-current month (UTC), aggregated by provider across accounts. It is not a
-provider charge, account balance or quota. Expand **More metrics** for
-secondary counters and model details.
+The compact view prioritizes wallet balances and remaining quota bars.
+When no wallet is available, a verified spending cap is shown separately as
+a budget; unavailable balances or quotas are identified without assuming zero.
+Expand **Statistics & details** to inspect spending, tokens, model counters,
+additional budget policies and detailed availability reasons.
+When a wallet, general spending cap or subscription quota cannot be read, a
+separate collapsed **OpenCode usage estimate** section provides today's and
+the current month's recorded local usage (UTC), aggregated by provider
+across accounts. It is not a provider charge, account balance or quota.
 
 See [provider metrics and endpoints](docs/PROVIDER_METRICS.md) for the
 supported and experimental contracts.
