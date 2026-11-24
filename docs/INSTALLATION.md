@@ -10,8 +10,9 @@
    `Install.cmd`. Windows PowerShell is part of Windows; no separate Node.js or
    OpenCode CLI installation is needed.
 4. Reopen OpenCode Desktop.
-5. Under **Settings → General → Interface layout**, select **Side tabs** or
-   **Inbox**. The indicator lives at the bottom of the left sidebar.
+5. Under **Settings → General → Interface layout**, select **Side tabs**,
+   **Inbox**, or **Top tabs**. The indicator lives in the lower-left corner,
+   inside the sidebar when present.
 
 The installer puts files into
 `%USERPROFILE%\.config\opencode\plugins\usage-dashboard` by default,
@@ -36,9 +37,9 @@ data, including retired private profiles. It is not required for the new version
 ## If the plugin appears in Extensions but the icon is missing
 
 - Confirm OpenCode **Desktop**, not an unsupported interface.
-- Use **Side tabs** or **Inbox**, not **Top tabs**.
+- Confirm a supported layout: **Side tabs**, **Inbox**, or **Top tabs**.
 - Restart OpenCode after installing or changing the interface layout.
-- The left-sidebar button currently depends on experimental OpenCode DOM
+- Indicator placement currently depends on experimental OpenCode DOM
   structures, which can change between desktop versions.
 - If the plugin reports an initialization error, capture its *sanitized*
   error message and the Desktop version; report it in GitHub Issues.
