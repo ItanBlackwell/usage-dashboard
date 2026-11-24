@@ -87,6 +87,10 @@ function browserBalanceFor(account,snapshot) {
   const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
   return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
 }
+function formatCurrency(amount,currency) {
+  if(!Number.isFinite(amount)||!['USD','CNY'].includes(currency))return '—';
+  return (currency==='CNY'?'¥':'$')+(amount===0?0:amount).toFixed(2);
+}
 function indicatorPresentation(account,snapshot) {
   if(!account)return {mode:'unavailable'};
   if(account.kind==='api'){
@@ -109,5 +113,5 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,formatCurrency };
 

@@ -2,6 +2,9 @@
 
 ## 0.13.0 (unreleased)
 
+- Correct missing USD symbol in the generated bundle, support the current
+  OpenCode Console billing route, and show browser companion delivery status.
+
 - Preserve confirmed API balances, including zero, during temporary request failures.
 - Extend the optional browser billing companion to OpenCode Zen and explain
   unavailable or last-known balances without treating missing data as zero.

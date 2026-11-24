@@ -18,12 +18,24 @@ browser cookies or API keys.
    `https://platform.openai.com/settings/organization/billing/overview`
    page while signed in. The extension reads only a recognized visible balance.
    For OpenCode Zen, open the Billing page of your own workspace at
-   `https://opencode.ai/workspace/<workspace-id>/billing`.
+   `https://opencode.ai/console/<workspace-id>/settings/billing` (current console),
+   or the legacy `https://opencode.ai/workspace/<workspace-id>/billing`.
+   Open the page using Settings > Billing in the console.
    Reload the installed extension after upgrading and approve its new site permission.
    Keep only one billing tab per provider open and verify that the browser
    workspace/organization matches the connected API key. Browser balances are
    shown only when exactly one API account for that provider is connected.
    Changes are detected while the browser is open and the page is available.
+
+## Troubleshooting
+
+Pin the browser extension to see its per-tab badge: `OK` means the amount
+was accepted by the local receiver, `?` means no unambiguous balance was
+found, `2+` means multiple billing tabs, and `ERR` means the local receiver
+could not be reached or rejected the report. Reload the billing page after
+reloading the extension. An accepted reading is shown only for a single
+connected API account for that provider. The extension does not initiate paid
+API requests. Unknown amounts remain unknown.
 
 ## Privacy and limitations
 

@@ -1272,6 +1272,10 @@ function browserBalanceFor(account,snapshot) {
   const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
   return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
 }
+function formatCurrency(amount,currency) {
+  if(!Number.isFinite(amount)||!['USD','CNY'].includes(currency))return '—';
+  return (currency==='CNY'?'¥':'$')+(amount===0?0:amount).toFixed(2);
+}
 function indicatorPresentation(account,snapshot) {
   if(!account)return {mode:'unavailable'};
   if(account.kind==='api'){
@@ -1294,7 +1298,7 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,formatCurrency };
 
 
 })(__presentation,__presentation.exports);
@@ -1509,8 +1513,8 @@ const $ = (tag, style='', text='') => { const e=document.createElement(tag); e.s
 const add = (parent, el) => { parent.appendChild(el); return el; };
 const empty = parent => parent.replaceChildren();
 const pct = value => `${Math.round(value)}%`;
-const money = value => `${Number(value).toFixed(2)}`;
-const currencyAmount = (amount,currency) => currency==='CNY'?`¥${Number(amount).toFixed(2)}`:money(amount);
+const currencyAmount = presentation.formatCurrency;
+const money = value => currencyAmount(value,'USD');
 const snapshotListeners = new Set();
 // Per-desktop-window first-seen order survives closing and reopening the popup.
 const stableAccountOrder = new Map();
@@ -1713,7 +1717,11 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     if(amountEl && (!hasOwn||account.state==='stale')){
       const note=balance?(ru?'Баланс из открытой страницы оплаты; проверьте соответствие аккаунта.':'Balance from the open billing page; verify the matching account.')
         :hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
-        :ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.';
+        :['codex','opencode'].includes(account.provider)
+          ?(apiAccounts.filter(a=>a.provider===account.provider).length!==1
+            ?(ru?'Несколько API-аккаунтов: баланс страницы оплаты нельзя безопасно привязать.':'Multiple API accounts: billing page balance cannot be safely attributed.')
+            :(ru?'Откройте Billing в Chrome/Edge с расширением Usage Dashboard и проверьте его значок.':'Open Billing in Chrome/Edge with the Usage Dashboard extension and check its badge.'))
+          :(ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.');
       amountEl.title=[note,amountEl.title].filter(Boolean).join('\n');
     }
     const extras=Array.isArray(account.balances)?account.balances.filter(b=>b && b.kind==='balance' && b.currency!==own?.currency && Number.isFinite(b.amount)):[];
