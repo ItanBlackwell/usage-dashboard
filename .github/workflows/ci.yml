@@ -5,7 +5,7 @@ name: CI
 
 on:
   push:
-    branches: [main, fix/api-balance-availability]
+    branches: [main, feat/top-tabs-indicator]
   pull_request:
     branches: [main]
 
