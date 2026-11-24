@@ -2975,7 +2975,7 @@ function layoutMutation(change){
 }
 function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
   const sidebarStyle=`box-sizing:border-box;flex:0 0 auto;margin-top:auto;min-height:40px;display:flex;align-items:center;justify-content:flex-start;padding:4px 4px 0;border-top:1px solid ${palette.border}`;
-  const topTabsStyle='box-sizing:border-box;position:fixed;left:8px;bottom:max(8px,env(safe-area-inset-bottom,0px));z-index:30;width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent';
+  const topTabsStyle='box-sizing:border-box;position:fixed;left:16px;bottom:max(16px,env(safe-area-inset-bottom,0px));z-index:30;width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:transparent';
   const wrapper=$('div',sidebarStyle);
   wrapper.setAttribute('data-pv-usage-sidebar','true');
   const setLayout=mode=>{
