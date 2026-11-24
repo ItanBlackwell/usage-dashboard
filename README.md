@@ -30,14 +30,14 @@ Desktop versions.
 1. Download **Usage-Dashboard-Portable-0.13.0.zip** from the [latest GitHub Release](https://github.com/ItanBlackwell/usage-dashboard/releases/latest).
 2. Extract the ZIP and completely close OpenCode Desktop.
 3. Run **`Install.cmd`** by double-clicking it, then restart OpenCode.
-4. Go to **Settings → General → Interface layout** and choose **Side tabs** or **Inbox**.
-5. Look for the circular Usage Dashboard indicator at the bottom of the left sidebar.
+4. Go to **Settings → General → Interface layout** and choose **Side tabs**, **Inbox**, or **Top tabs**.
+5. Look for the circular Usage Dashboard indicator in the lower-left corner (inside the sidebar when present).
 
 No separate Node.js, OpenCode CLI or manual PowerShell commands are required
 for Portable installation. The script uses built-in Windows PowerShell.
 
-**Important:** The icon is not displayed with **Top tabs**. If OpenCode lists
-an installed plugin but no indicator appears, check the layout and restart.
+**Note:** Top tabs uses a compact floating indicator; layout compatibility depends
+on the experimental Desktop DOM. If the indicator is missing, restart OpenCode.
 
 See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
 
@@ -97,7 +97,7 @@ supported and experimental contracts.
 
 ## Features
 
-- Sidebar icon with colored quota rings and a compact account popup.
+- Lower-left icon with colored quota rings and a compact account popup across all three layouts.
 - Five-hour and weekly quota windows, when the provider exposes them.
 - Serialized account switching: new selections replace pending unstarted
   requests, preventing stale updates from overriding the latest click.
