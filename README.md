@@ -27,7 +27,7 @@ Desktop versions.
 
 ## Installation (Windows)
 
-1. Download **Usage-Dashboard-Portable-0.13.0.zip** from the [latest GitHub Release](https://github.com/ItanBlackwell/usage-dashboard/releases/latest).
+1. Download **Usage-Dashboard-Portable-0.14.0.zip** from the [latest GitHub Release](https://github.com/ItanBlackwell/usage-dashboard/releases/latest).
 2. Extract the ZIP and completely close OpenCode Desktop.
 3. Run **`Install.cmd`** by double-clicking it, then restart OpenCode.
 4. Go to **Settings → General → Interface layout** and choose **Side tabs**, **Inbox**, or **Top tabs**.
@@ -36,7 +36,7 @@ Desktop versions.
 No separate Node.js, OpenCode CLI or manual PowerShell commands are required
 for Portable installation. The script uses built-in Windows PowerShell.
 
-**Note:** Top tabs uses a compact floating indicator; layout compatibility depends
+**Note:** Top tabs uses a compact floating indicator with 16 px edge spacing; layout compatibility depends
 on the experimental Desktop DOM. If the indicator is missing, restart OpenCode.
 
 See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
@@ -92,13 +92,17 @@ separate collapsed **OpenCode usage estimate** section provides today's and
 the current month's recorded local usage (UTC), aggregated by provider
 across accounts. It is not a provider charge, account balance or quota.
 
+Since version 0.14.0, browser-based billing and the companion extension are retired.
+Existing provider connections are used directly; no extra browser login is required.
+
 See [provider metrics and endpoints](docs/PROVIDER_METRICS.md) for the
 supported and experimental contracts.
 
 ## Features
 
 - Lower-left icon with colored quota rings and a compact account popup across all three layouts.
-- Five-hour and weekly quota windows, when the provider exposes them.
+- Five-hour and weekly quota windows, plus monthly windows where supported.
+- Hover over a quota reset countdown to see its exact local reset time.
 - Serialized account switching: new selections replace pending unstarted
   requests, preventing stale updates from overriding the latest click.
 - Cached, refreshed usage summaries. Account credentials stay in the host

@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.13.0 (unreleased)
+## 0.14.0
+
+- Show the exact local quota reset time on hover.
+- Increase Top tabs indicator edge spacing to 16 px.
 
 - Add an experimental lower-left floating indicator for Top tabs, reusing the
   existing popup and switching automatically to the in-flow sidebar indicator
@@ -49,6 +52,8 @@
 
 - Show connected OpenCode pay-as-you-go and OpenCode Go accounts; retrieve Go
   quota windows from the official usage API, without guessing missing balances.
+
+## 0.13.0
 
 - Release the project as open source under the Mozilla Public License 2.0.
 - Document installation, GUI layout support, OpenCode budget metrics and security reporting.
