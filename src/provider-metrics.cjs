@@ -22,7 +22,7 @@ const SPEC=Object.freeze({
   plan_parallel:'count'
 });
 const GROUPS=new Set(['balance','budget','usage','cost','tokens','extra','tools','grants','breakdown','quota']);
-const STATUSES=new Set(['unsupported','forbidden','unauthorized','rate_limited','request_failed','invalid_payload','invalid_balance','missing_windows','missing_rate_limits','no_limit','no_balance_access','no_prepaid_balance','not_returned','no_budgets','experimental','insufficient_balance','login_expired','credential_not_readable','workspace_required','unsupported_console','plugin_ipc_unavailable','stale','quota_unavailable']);
+const STATUSES=new Set(['unsupported','forbidden','unauthorized','rate_limited','request_failed','invalid_payload','invalid_balance','missing_windows','missing_rate_limits','no_limit','no_key_limit','no_applicable_budgets','no_balance_access','no_prepaid_balance','not_returned','no_budgets','experimental','insufficient_balance','login_expired','credential_not_readable','workspace_required','unsupported_console','plugin_ipc_unavailable','stale','quota_unavailable']);
 const num=x=>(typeof x==='number'||typeof x==='string'&&x.trim()!=='')&&Number.isFinite(Number(x))?Number(x):null;
 const nonnegative=x=>{const n=num(x);return n!==null&&n>=0&&n<=1e12?n:null;};
 const count=x=>{const n=num(x);return Number.isSafeInteger(n)&&n>=0&&n<=1e15?n:null;};
@@ -60,13 +60,40 @@ function cleanNotices(rows){
     .filter(r=>{const key=r.group+':'+r.status;if(seen.has(key))return false;seen.add(key);return true;})
     .map(r=>({group:r.group,status:r.status}));
 }
+// OpenRouter policy metadata contains private guardrail, member and workspace
+// identifiers. Keep only public-safe scope, counters and reset information.
+const ROUTER_SCOPES=['workspace_default_member','workspace_default_key','member','api_key','workspace','key_limit'];
+const ROUTER_PERIODS=['daily','weekly','monthly','none'];
+const validMoney=x=>typeof x==='number'&&Number.isFinite(x)&&Math.abs(x)<=1e12;
+const validDate=x=>Number.isSafeInteger(x)&&x>0&&x<=8640000000000000;
+function cleanRouterPolicy(v){
+  if(!v||!ROUTER_SCOPES.includes(v.scope)||!ROUTER_PERIODS.includes(v.period)||
+    !validMoney(v.limit)||v.limit<0||!validMoney(v.spent)||v.spent<0||
+    !validMoney(v.remaining)||v.remaining<0||v.remaining>v.limit||
+    typeof v.includeByok!=='boolean')return null;
+  if(v.period==='none'?v.resetsAt!==null:!validDate(v.resetsAt))return null;
+  // Validate the supplied amount without inventing a missing counter.
+  const expected=Math.max(0,v.limit-v.spent);
+  if(Math.abs(expected-v.remaining)>Math.max(1e-7,v.limit*1e-10,v.spent*1e-10))return null;
+  return {scope:v.scope,limit:v.limit,spent:v.spent,remaining:v.remaining,period:v.period,
+    resetsAt:v.resetsAt,includeByok:v.includeByok};
+}
+function cleanFreeDaily(v){
+  if(!v||![v.used,v.limit,v.remaining].every(x=>Number.isSafeInteger(x)&&x>=0&&x<=1e12)||
+    v.remaining!==Math.max(0,v.limit-v.used)||!validDate(v.resetsAt))return null;
+  return {used:v.used,limit:v.limit,remaining:v.remaining,resetsAt:v.resetsAt};
+}
 function cleanKeyBudget(v){
   if(!v||typeof v!=='object')return null;
   const n=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0&&x<=1e12?x:null;
   const date=x=>typeof x==='number'&&Number.isSafeInteger(x)&&x>0&&x<=8640000000000000?x:null;
   const period=['daily','weekly','monthly','none'].includes(v.period)?v.period:null;
   return {limit:n(v.limit),remaining:n(v.remaining),period,resetsAt:date(v.resetsAt),expiresAt:date(v.expiresAt),
-    includeByok:typeof v.includeByok==='boolean'?v.includeByok:null,freeTier:typeof v.freeTier==='boolean'?v.freeTier:null};
+    includeByok:typeof v.includeByok==='boolean'?v.includeByok:null,freeTier:typeof v.freeTier==='boolean'?v.freeTier:null,
+    policies:Array.isArray(v.policies)&&v.policies.length<=100?v.policies.map(cleanRouterPolicy).filter(Boolean):[],
+    effective:cleanRouterPolicy(v.effective),
+    freeDaily:cleanFreeDaily(v.freeDaily),
+    policyState:['complete','partial','legacy','invalid'].includes(v.policyState)?v.policyState:'legacy'};
 }
 function reason(error){return STATUSES.has(error?.message)?error.message:'request_failed';}
-module.exports={SPEC,metric,cleanMetrics,cleanNotices,cleanKeyBudget,nonnegative,count,num,safeModel,reason};
+module.exports={SPEC,metric,cleanMetrics,cleanNotices,cleanKeyBudget,cleanRouterPolicy,cleanFreeDaily,nonnegative,count,num,safeModel,reason};

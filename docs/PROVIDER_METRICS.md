@@ -10,7 +10,7 @@ or change provider settings. Missing values are unknown, not zero.
 | --- | --- | --- |
 | DeepSeek | API key | Total wallet balance, topped-up and granted funds by currency, sufficient-funds flag |
 | Moonshot / Kimi | API key | Available balance, cash and voucher components; USD or CNY according to the integration region |
-| OpenRouter | API key | Key spending cap, remaining cap, reset period, expiration, daily/weekly/monthly/lifetime spend and BYOK spend |
+| OpenRouter | API key | Key cap, all applicable workspace/member/key policy budgets, effective budget, reset period, expiration, free-model daily counter, daily/weekly/monthly/lifetime spend and BYOK spend |
 | OpenRouter | Existing management-capable key | Wallet total credits, usage and remaining balance, independently of key cap |
 | Claude | Existing API key with organization analytics permission | Calendar-month organization costs, tokens and requests, and per-model breakdown; documented beta |
 | Kimi Code | Existing coding connection | Measured plan windows; experimental additional monthly windows and Extra Usage fields if returned |
@@ -31,10 +31,16 @@ wallet balances or per-key spend. The model rows are limited to the largest
 pages. Incomplete pages or a missing data freshness timestamp do not produce
 a total.
 
-OpenRouter reset instants are derived from the documented midnight UTC
-daily/weekly/monthly schedules. Weekly resets are Monday UTC. A cap remains
-distinct from the wallet; if the cap expires or resets before a fresh reading,
-its old remaining amount is unknown. A key cap is not a payment balance.
+OpenRouter's current-key response may return individual, workspace and guardrail
+budgets even when the individual key limit is null. Each policy is shown
+separately; the provider's effective budget is preferred for the indicator when
+the wallet is unavailable. Never sum policies or treat a cap as a wallet balance.
+The individual key reset and free-model daily reset use the documented midnight
+UTC schedules; policy resets use the exact provider-supplied instant. A reset
+or expiration makes the old remaining amount unknown until refreshed. Free-model
+daily counters describe the provider's tier policy; exempt accounts and BYOK may
+not be subject to the ceiling. Missing policy fields and an explicit empty
+policy list are different availability states.
 BYOK figures are shown separately and never added to the provider's spend
 fields. Money amounts retain their currency.
 
@@ -44,8 +50,10 @@ fields. Money amounts retain their currency.
   GET https://api.deepseek.com/user/balance.
 - Moonshot: GET /v1/users/me/balance on api.moonshot.ai or api.moonshot.cn.
 - [OpenRouter current key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key):
-  GET https://openrouter.ai/api/v1/key; GET /api/v1/credits only when the existing
-  key explicitly identifies itself as management-capable.
+  GET https://openrouter.ai/api/v1/key; reads budgets, effective_budget and
+  free_model_daily_requests as documented in [Limits](https://openrouter.ai/docs/api_reference/limits).
+  GET /api/v1/credits only when the existing key explicitly identifies itself
+  as management-capable.
 - [Claude Usage and Cost Analytics](https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api):
   GET /v1/organizations/analytics/cost and /usage at api.anthropic.com, with
   the documented beta header. Costs are cents converted to USD.

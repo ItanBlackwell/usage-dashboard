@@ -110,17 +110,33 @@ function formatCurrency(amount,currency) {
   if(!Number.isFinite(amount)||!['USD','CNY'].includes(currency))return '—';
   return (currency==='CNY'?'¥':'$')+(amount===0?0:amount).toFixed(2);
 }
+// An effective budget is not wallet money. After a policy reset or expiry,
+ // the previous effective value cannot be reused or replaced by a looser cap.
+function openRouterBudget(account,now=Date.now()){
+  const k=account?.keyBudget;
+  if(account?.provider!=='openrouter'||!k||k.expiresAt&&k.expiresAt<=now)return null;
+  const valid=b=>b&&Number.isFinite(b.remaining)&&b.remaining>=0&&
+    (b.period==='none'||Number.isFinite(b.resetsAt)&&b.resetsAt>now);
+  if(k.effective&&k.policyState!=='invalid'){
+    if(!valid(k.effective)||(k.policies||[]).some(b=>!valid(b)))return null;
+    return {...k.effective,effective:true};
+  }
+  // Older responses expose only the individual key cap. Do not claim an
+  // effective allowance from an incomplete or malformed policy list.
+  if(k.policyState&&k.policyState!=='legacy')return null;
+  if(Number.isFinite(k.limit)&&Number.isFinite(k.remaining)&&k.remaining>=0&&
+    (!k.resetsAt||k.resetsAt>now))return {scope:'key_limit',limit:k.limit,remaining:k.remaining,period:k.period,
+      resetsAt:k.resetsAt,includeByok:k.includeByok,effective:false};
+  return null;
+}
 function indicatorPresentation(account,snapshot) {
   if(!account)return {mode:'unavailable'};
   if(account.kind==='api'){
     const own=account.balance;
     // An actual wallet balance takes priority over a separately marked cap.
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
-    // A key cap is separately marked as a budget, not a wallet.
-    if(own?.kind==='key_limit'&&Number.isFinite(own.amount)&&account.keyBudget&&
-      (!account.keyBudget.resetsAt||account.keyBudget.resetsAt>Date.now())&&
-      (!account.keyBudget?.expiresAt||account.keyBudget.expiresAt>Date.now()))
-      return {mode:'api',amount:own.amount,currency:own.currency,metric:'budget'};
+    const routerBudget=openRouterBudget(account);
+    if(routerBudget)return {mode:'api',amount:routerBudget.remaining,currency:'USD',metric:'budget'};
     const budget=tightestGeneralBudget(account);
     if(budget)return {mode:'api',amount:budget.remainingUsd,currency:'USD',metric:'budget'};
     return {mode:'api',amount:null,currency:'USD'};
@@ -135,5 +151,5 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,formatCurrency,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,openRouterBudget,formatCurrency,mergeInventoryFallback };
 

@@ -13,6 +13,8 @@ Public-release preparation for Usage Dashboard. This release is **not published*
 - Separate prepaid balance and policy budgets, including budget reset times.
   Remove browser-based financial data acquisition and runtime dependencies.
 
+- OpenRouter workspace/member/key budgets, effective allowance and daily
+  free-model counter, using the existing inference key.
 - Extended provider metrics for DeepSeek, Moonshot, OpenRouter, Claude,
   Kimi Code, MiniMax and Z.AI, with visible availability explanations.
   Experimental or permission-dependent data is explicitly labeled.

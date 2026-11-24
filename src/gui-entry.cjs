@@ -25,7 +25,10 @@ const BudgetSchema = Schema.Struct({limitUsd:Schema.Number,spentUsd:Schema.NullO
   resetsAt:Schema.Number,scope:Schema.String,coverage:Schema.String,per:Schema.String,shared:Schema.Boolean});
 const DetailSchema=Schema.Struct({code:Schema.String,value:Schema.Number,currency:Schema.NullOr(Schema.String),model:Schema.NullOr(Schema.String),at:Schema.NullOr(Schema.Number)});
 const NoticeSchema=Schema.Struct({group:Schema.String,status:Schema.String});
-const KeyBudgetSchema=Schema.Struct({limit:Schema.NullOr(Schema.Number),remaining:Schema.NullOr(Schema.Number),period:Schema.NullOr(Schema.String),resetsAt:Schema.NullOr(Schema.Number),expiresAt:Schema.NullOr(Schema.Number),includeByok:Schema.NullOr(Schema.Boolean),freeTier:Schema.NullOr(Schema.Boolean)});
+const RouterPolicySchema=Schema.Struct({scope:Schema.String,limit:Schema.Number,spent:Schema.Number,remaining:Schema.Number,period:Schema.String,resetsAt:Schema.NullOr(Schema.Number),includeByok:Schema.Boolean});
+const FreeDailySchema=Schema.Struct({used:Schema.Number,limit:Schema.Number,remaining:Schema.Number,resetsAt:Schema.Number});
+const KeyBudgetSchema=Schema.Struct({limit:Schema.NullOr(Schema.Number),remaining:Schema.NullOr(Schema.Number),period:Schema.NullOr(Schema.String),resetsAt:Schema.NullOr(Schema.Number),expiresAt:Schema.NullOr(Schema.Number),includeByok:Schema.NullOr(Schema.Boolean),freeTier:Schema.NullOr(Schema.Boolean),
+  policies:Schema.Array(RouterPolicySchema),effective:Schema.NullOr(RouterPolicySchema),freeDaily:Schema.NullOr(FreeDailySchema),policyState:Schema.String});
 const ModelWindowSchema=Schema.Struct({label:Schema.String,model:Schema.String,usedPercent:Schema.Number,remainingPercent:Schema.Number,resetsAt:Schema.NullOr(Schema.Number)});
 const AccountSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,kind:Schema.String,
   label:Schema.String,source:Schema.String,active:Schema.Boolean,state:Schema.String,message:Schema.String,
@@ -38,7 +41,7 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
   limitType:Schema.String,checkedAt:Schema.Number });
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
   inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v5',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v6',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -222,9 +225,11 @@ function renderProviderDetails(ctx,card,account){
   const reasons={
     unsupported:tr('not supported with existing connection','не поддерживается с текущим подключением'),
     no_usage_endpoint:tr('no supported endpoint','нет поддерживаемого API'),
-    no_balance_access:tr('wallet access not granted','нет доступа к кошельку'),
+    no_balance_access:tr('wallet requires a management key','кошелёк недоступен обычному API-ключу'),
     no_prepaid_balance:tr('no prepaid wallet','нет предоплаченного кошелька'),
     no_limit:tr('no configured cap returned','лимит не задан или не возвращён'),
+    no_key_limit:tr('no individual key cap; other budgets not reported','лимит ключа не задан; другие бюджеты не возвращены'),
+    no_applicable_budgets:tr('no applicable spending caps configured','нет настроенных лимитов расходов'),
     no_budgets:tr('no applicable budgets returned','нет доступных бюджетов'),
     not_returned:tr('not returned by provider','не возвращается провайдером'),
     unauthorized:tr('authorization rejected (401)','авторизация отклонена (401)'),
@@ -249,7 +254,7 @@ function renderProviderDetails(ctx,card,account){
   };
   const rows=account.metrics||[],notices=[...(account.notices||[])];
   const hasBalance=account.balance?.kind==='balance'&&Number.isFinite(account.balance.amount);
-  const hasKey=account.keyBudget&&Number.isFinite(account.keyBudget.limit);
+  const hasKey=account.keyBudget&&(Number.isFinite(account.keyBudget.limit)||account.keyBudget.effective||account.keyBudget.policies?.length);
   if(account.kind==='api'){
     if(!hasBalance&&!notices.some(n=>n.group==='balance'))notices.push({group:'balance',status:account.message==='no_usage_endpoint'||account.message==='api_key_connected'?'unsupported':account.message==='key_limit_only'?'no_balance_access':account.message});
     if(account.provider!=='opencode'&&!hasKey&&!notices.some(n=>n.group==='budget')){
@@ -268,13 +273,37 @@ function renderProviderDetails(ctx,card,account){
   };
   const date=v=>{try{return Number.isFinite(v)?new Intl.DateTimeFormat(ru?'ru-RU':undefined,{dateStyle:'short',timeStyle:'short'}).format(new Date(v)):'—';}catch{return '—';}};
   if(account.keyBudget){
-    const k=account.keyBudget,expired=k.expiresAt&&k.expiresAt<=Date.now(),reset=k.resetsAt&&k.resetsAt<=Date.now();
-    if(Number.isFinite(k.limit)){
+    const k=account.keyBudget,now=Date.now(),expired=k.expiresAt&&k.expiresAt<=now,reset=k.resetsAt&&k.resetsAt<=now;
+    const scopes={workspace_default_member:tr('Default member cap','Бюджет участника по умолчанию'),
+      workspace_default_key:tr('Default key cap','Бюджет ключа по умолчанию'),
+      member:tr('Member budget','Бюджет участника'),api_key:tr('Key policy','Политика ключа'),
+      workspace:tr('Shared workspace budget','Общий бюджет workspace'),key_limit:tr('Individual key cap','Индивидуальный лимит ключа')};
+    const periods={daily:tr('daily','день'),weekly:tr('weekly','неделя'),monthly:tr('monthly','месяц'),none:tr('no reset','без сброса')};
+    const showPolicy=(policy,isEffective=false)=>{
+      const remaining=expired||policy.resetsAt&&policy.resetsAt<=now?null:policy.remaining;
+      const title=scopes[policy.scope]||tr('Budget','Бюджет');
+      row(list,(isEffective?tr('Effective: ','Основной: '):'')+title,money(remaining)+' / '+money(policy.limit),
+        title+' · '+(periods[policy.period]||'—')+'\n'+tr('Spent: ','Расход: ')+money(remaining===null?null:policy.spent)+'\n'+tr('Resets: ','Сброс: ')+date(policy.resetsAt)+'\n'+tr('BYOK included: ','BYOK учитывается: ')+(policy.includeByok?tr('Yes','Да'):tr('No','Нет')));
+    };
+    if(k.effective)showPolicy(k.effective,true);
+    let skippedEffective=false;
+    for(const policy of k.policies||[]){
+      if(!skippedEffective&&k.effective&&['scope','limit','spent','remaining','period','resetsAt','includeByok'].every(field=>policy[field]===k.effective[field])){
+        skippedEffective=true;continue;
+      }
+      showPolicy(policy);
+    }
+    if(Number.isFinite(k.limit)&&!(k.policies||[]).some(b=>b.scope==='key_limit')&&k.effective?.scope!=='key_limit'){
       const period={daily:tr('daily','день'),weekly:tr('weekly','неделя'),monthly:tr('monthly','месяц'),none:tr('no reset','без сброса')}[k.period]||'—';
       row(list,tr('Key cap','Бюджет ключа')+' · '+period,money(expired||reset?null:k.remaining)+' / '+money(k.limit),
         tr('Key spending cap, not wallet money','Лимит расходов ключа, не баланс')+'\n'+tr('Resets: ','Сброс: ')+date(k.resetsAt));
     }
     if(Number.isFinite(k.expiresAt))row(list,tr('Key expires','Ключ истекает'),date(k.expiresAt));
+    if(k.freeDaily){
+      const q=k.freeDaily,remaining=expired||q.resetsAt<=now?null:q.remaining;
+      row(list,tr('Free models · daily','Бесплатные модели · день'),(remaining===null?'—':remaining.toLocaleString(ru?'ru-RU':'en-US'))+' / '+q.limit.toLocaleString(ru?'ru-RU':'en-US'),
+        tr('Daily free-model counter; exemptions and BYOK may not be subject to this ceiling.','Дневной счётчик бесплатных моделей; исключения и BYOK могут не ограничиваться этой квотой.')+'\n'+tr('Used: ','Использовано: ')+(remaining===null?'—':q.used)+'\n'+tr('Resets: ','Сброс: ')+date(q.resetsAt));
+    }
   }
   const renderMetric=(parent,m)=>{
     const label=labels[m.code];if(!label)return;
@@ -406,12 +435,16 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const card=compactCard(list,account.active);
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
-    const capExpired=own?.kind==='key_limit'&&(!account.keyBudget||account.keyBudget.resetsAt&&account.keyBudget.resetsAt<=Date.now()||account.keyBudget.expiresAt&&account.keyBudget.expiresAt<=Date.now());
-    const display=hasOwn&&!capExpired?currencyAmount(own.amount,own.currency):'—';
-    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:null);
+    const routerBudget=presentation.openRouterBudget(account);
+    const actualWallet=hasOwn&&own.kind==='balance';
+    const shownBudget=!actualWallet&&routerBudget;
+    const display=actualWallet?currencyAmount(own.amount,own.currency):shownBudget?money(shownBudget.remaining):'—';
+    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,actualWallet||shownBudget?account.checkedAt:null);
     const amountEl=card.querySelector('[data-pv-api-amount]');
     const ru=String(ctx.locale?.locale?.()||'en').startsWith('ru');
-    if(amountEl && (!hasOwn||account.state==='stale')){
+    if(amountEl&&shownBudget){
+      amountEl.title=[ru?'Остаток бюджета расходов, не средства кошелька.':'Remaining spending budget, not wallet funds.',amountEl.title].filter(Boolean).join('\n');
+    }else if(amountEl && (!actualWallet||account.state==='stale')){
       const reasons={
         plugin_ipc_unavailable:['Plugin service unavailable; inventory-only mode.','Служба плагина недоступна; режим списка аккаунтов.'],
         credential_not_readable:['The host did not supply a readable API credential.','OpenCode не предоставил доступный API-ключ.'],
@@ -429,7 +462,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
         login_expired:['OpenCode login expired.','Срок входа в OpenCode истёк.']
       };
       const reason=reasons[account.message]?.[ru?1:0];
-      const note=hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
+      const note=actualWallet?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
         :(ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.');
       amountEl.title=[note,reason,amountEl.title].filter(Boolean).join('\n');
     }
@@ -438,9 +471,9 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
       extras.map(b=>currencyAmount(b.amount,b.currency)).join(' · ')));
     renderConsoleBudgets(ctx,card,account);
     renderProviderDetails(ctx,card,account);
-    if(hasOwn && own.kind==='key_limit'){
+    if(shownBudget){
       const lang=ctx.locale?.locale?.()||'en';
-      const label=String(lang).startsWith('ru')?'Остаток лимита ключа, не баланс':'API key spending cap, not account balance';
+      const label=String(lang).startsWith('ru')?'Остаток бюджета расходов, не баланс':'Spending budget remaining, not wallet balance';
       const noteEl=add(card,$('span',`font-size:9.5px;color:${palette.muted}`,label));noteEl.setAttribute('data-pv-key-limit-label','true');
     }
   }

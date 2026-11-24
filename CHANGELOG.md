@@ -2,6 +2,11 @@
 
 ## 0.13.0 (unreleased)
 
+- Read OpenRouter's applicable and effective budget policies, including shared
+  workspace and guardrail caps, and the daily free-model counter from the
+  existing key. Distinguish missing budget metadata from no configured budgets.
+  Keep wallet access separate and invalidate budget counters after reset.
+
 - Expand DeepSeek and Moonshot balance breakdowns and OpenRouter key spending,
   BYOK, cap/reset and expiration metrics using existing credentials.
 - Add permission-aware Claude organization analytics (documented beta),

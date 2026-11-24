@@ -257,6 +257,15 @@ function kimiDetails(body,currency){
   return {metrics:rows,notices:[{group:'budget',status:'unsupported'},{group:'usage',status:'unsupported'},
     ...(rows.length<2?[{group:'breakdown',status:'not_returned'}]:[])]};
 }
+// The current-key API also exposes organization/guardrail budget policies.
+// Keep each one separate and trust only the provider's effective budget.
+function parseRouterPolicy(v){
+  if(!object(v)||typeof v.remaining_usd!=='number'||!Number.isFinite(v.remaining_usd)||Math.abs(v.remaining_usd)>1e12)return null;
+  const period=v.reset_interval===null?'none':v.reset_interval;
+  const resetsAt=v.resets_at===null?null:typeof v.resets_at==='string'?Date.parse(v.resets_at):NaN;
+  return metrics.cleanRouterPolicy({scope:v.scope,limit:v.limit_usd,spent:v.spend_usd,
+    remaining:Math.max(0,v.remaining_usd),period,resetsAt,includeByok:v.include_byok});
+}
 function parseOpenRouterKey(body,now=Date.now()) {
   const v=object(body?.data);
   if(!v) throw new Error('invalid_payload');
@@ -271,13 +280,40 @@ function parseOpenRouterKey(body,now=Date.now()) {
     if(period==='monthly')resetsAt=Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1);
   }
   const expiresAt=typeof v.expires_at==='string'?Date.parse(v.expires_at):null;
-  const keyBudget=metrics.cleanKeyBudget({limit,remaining:limit===null?null:left,period,resetsAt,expiresAt,includeByok:v.include_byok_in_limit,freeTier:v.is_free_tier});
+  const hasPolicies=Object.hasOwn(v,'budgets'),hasEffective=Object.hasOwn(v,'effective_budget');
+  const policyList=Array.isArray(v.budgets)&&v.budgets.length<=100?v.budgets.map(parseRouterPolicy):null;
+  const policies=policyList?.filter(Boolean)||[];
+  const effective=parseRouterPolicy(v.effective_budget);
+  const rawFree=v.free_model_daily_requests;
+  const date=new Date(now),dayEnd=Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),date.getUTCDate()+1);
+  const freeDaily=metrics.cleanFreeDaily({used:rawFree?.used,limit:rawFree?.limit,remaining:rawFree?.remaining,resetsAt:dayEnd});
+  const policyMatches=(x,y)=>['scope','limit','spent','remaining','period','resetsAt','includeByok'].every(k=>x[k]===y[k]);
+  const malformed=(hasPolicies&&(!policyList||policyList.some(x=>!x)))||
+    (hasEffective&&v.effective_budget!==null&&!effective)||
+    (policyList&&effective&&!policies.some(x=>policyMatches(x,effective)))||
+    (policyList&&policies.length>0&&hasEffective&&v.effective_budget===null)||
+    (policyList&&policies.length===0&&limit!==null);
+  const policyState=malformed?'invalid':hasPolicies&&hasEffective?'complete':hasPolicies||hasEffective?'partial':'legacy';
+  const keyBudget=metrics.cleanKeyBudget({limit,remaining:limit===null?null:left,period,resetsAt,expiresAt,includeByok:v.include_byok_in_limit,freeTier:v.is_free_tier,
+    policies,effective:malformed?null:effective,freeDaily,policyState});
+  const budgetNotices=[];
+  if(malformed)budgetNotices.push({group:'budget',status:'invalid_payload'});
+  else if(!policies.length&&!effective){
+    if(limit!==null&&left===null)budgetNotices.push({group:'budget',status:'not_returned'});
+    else if(limit===null){
+      const status=policyState==='complete'&&v.limit===null&&v.limit_remaining===null?'no_applicable_budgets':
+        v.limit===null?'no_key_limit':'not_returned';
+      budgetNotices.push({group:'budget',status});
+    }
+  }else if(!effective)budgetNotices.push({group:'budget',status:'not_returned'});
+  if(!freeDaily&&Object.hasOwn(v,'free_model_daily_requests'))budgetNotices.push({group:'quota',status:'invalid_payload'});
+  else if(!freeDaily)budgetNotices.push({group:'quota',status:'not_returned'});
   const rows=[];
   for(const [field,code] of [['usage_daily','key_daily'],['usage_weekly','key_weekly'],['usage_monthly','key_monthly'],['usage','key_total'],
     ['byok_usage_daily','byok_daily'],['byok_usage_weekly','byok_weekly'],['byok_usage_monthly','byok_monthly'],['byok_usage','byok_total']]){
     const m=metrics.metric(code,v[field],{currency:'USD'});if(m)rows.push(m);
   }
-  return {management:v.is_management_key===true,keyBudget,metrics:rows,
+  return {management:v.is_management_key===true,keyBudget,metrics:rows,budgetNotices,
     limit:left!==null&&limit!==null?validBalance(left,'USD','key_limit'):null};
 }
 function parseOpenRouterCredits(body) {
@@ -459,7 +495,7 @@ async function queryAdditional(entry,fetcher,time=nowMs()){
   }
   if(entry.provider==='openrouter'){
     const info=parseOpenRouterKey(await fetchSafe('https://openrouter.ai/api/v1/key',headers,fetcher),time);
-    const rows=[...info.metrics],notices=[];
+    const rows=[...info.metrics],notices=[...info.budgetNotices];
     let wallet=null;
     if(info.management){
       try{
@@ -470,8 +506,6 @@ async function queryAdditional(entry,fetcher,time=nowMs()){
         }
       }catch(e){notices.push({group:'balance',status:metrics.reason(e)});}
     }else notices.push({group:'balance',status:'no_balance_access'});
-    if(info.keyBudget.limit===null)notices.push({group:'budget',status:'no_limit'});
-    else if(info.keyBudget.remaining===null)notices.push({group:'budget',status:'not_returned'});
     if(!info.metrics.length)notices.push({group:'usage',status:'not_returned'});
     return {state:'ok',message:wallet?'ok':info.limit?'key_limit_only':'no_balance_access',
       balance:wallet||info.limit,keyBudget:info.keyBudget,metrics:rows,notices};

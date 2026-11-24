@@ -211,6 +211,38 @@ jobs:
             assert.equal(presentation.indicatorPresentation(oldCap,{}).amount,null);
             const cap={...routerRead,keyBudget:{...routerRead.keyBudget,resetsAt:Date.now()+86400000,expiresAt:null}};
             assert.equal(presentation.indicatorPresentation(cap,{}).metric,'budget');
+            // New current-key contracts can include enforceable workspace and
+            // member budgets even when the individual key limit is null.
+            const future=new Date(Date.now()+86400000).toISOString();
+            const policy=(scope,limit,spend,extra={})=>({scope,limit_usd:limit,spend_usd:spend,remaining_usd:limit-spend,
+              reset_interval:'daily',resets_at:future,include_byok:false,guardrail_id:'private-guardrail-fixture',budget_id:'private-budget-fixture',...extra});
+            const effective=policy('member',50,40),workspace=policy('workspace',100,80);
+            const modern=await read('openrouter',{data:{limit:null,limit_remaining:null,usage:9,budgets:[workspace,effective],effective_budget:effective,
+              free_model_daily_requests:{used:70,limit:100,remaining:30}}});
+            assert.equal(modern.balance,null);
+            assert.equal(modern.keyBudget.policies.length,2);
+            assert.equal(modern.keyBudget.effective.remaining,10);
+            assert.equal(presentation.openRouterBudget(modern).remaining,10);
+            assert.equal(presentation.indicatorPresentation(modern,{}).metric,'budget');
+            assert.equal(presentation.indicatorPresentation(modern,{}).amount,10);
+            assert.equal(modern.keyBudget.freeDaily.remaining,30);
+            assert.ok(!modern.notices.some(n=>n.group==='budget'));
+            assert.ok(notice(modern,'balance','no_balance_access'));
+            const cleanModern=sanitizeSnapshot({accounts:[modern]}).accounts[0];
+            assert.equal(cleanModern.keyBudget.effective.remaining,10);
+            assert.ok(!JSON.stringify(cleanModern).includes('private-guardrail-fixture'));
+            assert.ok(!JSON.stringify(cleanModern).includes('private-budget-fixture'));
+            assert.equal(presentation.openRouterBudget(modern,Date.parse(future)+1),null);
+            const exhausted=policy('api_key',25,30);
+            const zero=await read('openrouter',{data:{limit:null,limit_remaining:null,budgets:[exhausted],effective_budget:exhausted,
+              free_model_daily_requests:{used:105,limit:100,remaining:0}}});
+            assert.equal(zero.keyBudget.effective.remaining,0);assert.equal(zero.keyBudget.freeDaily.remaining,0);
+            const absent=await read('openrouter',{data:{limit:null,limit_remaining:null,budgets:[],effective_budget:null}});
+            assert.ok(notice(absent,'budget','no_applicable_budgets'));assert.equal(presentation.openRouterBudget(absent),null);
+            const legacy=await read('openrouter',{data:{limit:null,limit_remaining:null}});
+            assert.ok(notice(legacy,'budget','no_key_limit'));
+            const malformed=await read('openrouter',{data:{limit:20,limit_remaining:15,budgets:[{...effective,remaining_usd:null}],effective_budget:effective}});
+            assert.ok(notice(malformed,'budget','invalid_payload'));assert.equal(presentation.openRouterBudget(malformed),null);
             const claude=await queryQuota(entry('claude'),async(url,opts)=>{
               assert.equal(opts.headers['x-api-key'],'fixture-secret-claude');
               assert.equal(opts.headers['anthropic-beta'],'analytics-usage-cost-2026-08-24');
@@ -286,6 +318,11 @@ jobs:
             render(ctx,root,unsupported);
             const all=n=>[n,...n.childNodes.flatMap(all)];
             assert.ok(all(root).some(n=>n.attrs['data-pv-metric-notice']==='unsupported'&&n.textContent.includes('не поддерживается')));
+            const modernRoot=el('div','');render(ctx,modernRoot,cleanModern);
+            assert.ok(all(modernRoot).some(n=>n.textContent.includes('Бюджет участника')));
+            assert.ok(all(modernRoot).some(n=>n.textContent==='$10.00 / $50.00'));
+            assert.ok(all(modernRoot).some(n=>n.textContent.includes('Бесплатные модели')));
+            assert.ok(!all(modernRoot).some(n=>n.textContent.includes('не задан')||n.textContent.includes('нет настроенных лимитов')));
             const deniedRoot=el('div','');render(ctx,deniedRoot,partial);
             assert.ok(all(deniedRoot).some(n=>n.attrs['data-pv-metric-notice']==='forbidden'&&n.textContent.includes('403')));
           })().catch(e=>{console.error(e);process.exitCode=1;});
