@@ -96,6 +96,61 @@ jobs:
             }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
+      - name: Verify manual browser login boundary
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs/promises');
+          const os=require('node:os');
+          const path=require('node:path');
+          const {createBillingSessions,startLoginBrowser}=require('./src/billing-session.cjs');
+          const {EventEmitter}=require('node:events');
+          (async()=>{
+            const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ud-manual-login-'));
+            const a={id:'openai:test',provider:'codex',kind:'api',source:'OpenCode',message:'api_key_connected'};
+            const url='https://platform.openai.com/settings/organization/billing/overview';
+            let snapshot={accounts:[a],billingSessions:[],inventoryWarning:null};
+            let running=true,manualLaunches=0,automatedLaunches=0,closed=0;
+            const store={cached:async()=>snapshot,refresh:async()=>snapshot,
+              setBillingSession:async(id,provider,s)=>{snapshot={...snapshot,billingSessions:s?[s]:[]};return snapshot;}};
+            const page={url:()=>url,route:async()=>{},goto:async()=>{},evaluate:async()=>0};
+            const context={pages:()=>[page],once:()=>{},close:async()=>{closed++;}};
+            const service=createBillingSessions({directory:dir,store,
+              browserFinder:async()=>({channel:'msedge',executablePath:'edge.exe'}),
+              loginLauncher:async({url:target,profilePath})=>{
+                manualLaunches++;assert.equal(target,url);assert.ok(profilePath.startsWith(dir));
+                return {isRunning:()=>running};
+              },
+              chromiumLoader:()=>({launchPersistentContext:async(profilePath,options)=>{
+                automatedLaunches++;assert.equal(options.headless,true);assert.ok(profilePath.startsWith(dir));return context;
+              }})});
+            try{
+              assert.equal((await service.action(a.id,'open')).snapshot.billingSessions[0].state,'awaiting_confirmation');
+              assert.equal(manualLaunches,1);assert.equal(automatedLaunches,0);
+              assert.equal((await service.action(a.id,'confirm','https://accounts.google.com/')).reason,'invalid_billing_page');
+              assert.equal((await service.action(a.id,'confirm',url)).snapshot.billingSessions[0].state,'close_login_browser');
+              assert.equal(automatedLaunches,0);
+              running=false;
+              const result=await service.action(a.id,'confirm',url);
+              assert.equal(result.snapshot.billingSessions[0].state,'ok');
+              assert.equal(result.snapshot.billingSessions[0].amount,0);
+              assert.equal(automatedLaunches,1);assert.equal(closed,1);
+              const child=new EventEmitter();child.exitCode=null;child.signalCode=null;child.unref=()=>{};
+              const native=await startLoginBrowser({browser:{executablePath:'edge.exe'},profilePath:dir,url,env:{OPENAI_API_KEY:'secret'},
+                spawn:(executable,args,options)=>{
+                  assert.equal(executable,'edge.exe');
+                  assert.equal(options.shell,false);
+                  assert.equal(options.env.OPENAI_API_KEY,undefined);
+                  assert.ok(args.includes('--user-data-dir='+dir));
+                  assert.ok(args.includes(url));
+                  assert.ok(!args.some(a=>/remote-debugging|enable-automation|no-sandbox/.test(a)));
+                  queueMicrotask(()=>child.emit('spawn'));return child;
+                }});
+              assert.equal(native.isRunning(),true);
+            }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
       - name: Verify independent Billing command transport
         shell: bash
         run: |

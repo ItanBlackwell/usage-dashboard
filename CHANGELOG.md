@@ -2,6 +2,10 @@
 
 ## 0.13.0 (unreleased)
 
+- Separate ordinary-browser authorization from headless Billing reads. Require
+  manual login, closure of the dedicated login profile and explicit confirmation
+  of an allowlisted Billing URL. Do not automate OAuth or security verification.
+
 - Isolate Billing commands in a versioned IPC contract, acknowledge commands
   before launching the browser, and report transport-stage error codes.
 

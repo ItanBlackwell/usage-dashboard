@@ -23,13 +23,16 @@ plugin entry to `opencode.jsonc`: OpenCode automatically discovers the folder.
 The default installer prepares the optional Playwright Core runtime but does
 not open a browser or install an extension. Use the **Connect Billing** button
 on the desired OpenAI or Zen API card after restarting OpenCode. Sign in
-manually in the separate Edge (or Chrome) window, select the correct billing
-organization/workspace, and click **Confirm account** in Usage Dashboard.
+manually in the separate normal Edge (or Chrome) window, select the correct
+billing organization/workspace, and copy the Billing page address. Close all
+windows of that login profile. Paste the address in Usage Dashboard and click
+**Confirm account**. Automated reading starts only after manual login.
 See [Billing Session](BILLING_SESSION.md) for the complete instructions.
 
 The Portable ZIP contains the verified runtime archive. Source ZIP installation
 downloads it from npm and validates the locked SHA-512 hash. If the runtime
 is unavailable, the direct provider integrations still work.
+
 ## Upgrading from the browser companion
 
 The old browser extension and its local HTTP receiver have been removed.

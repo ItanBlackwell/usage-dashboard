@@ -7,7 +7,8 @@
 'use strict';
 
 // Main-process-only, opt-in billing sessions. Never attach to a user's normal
-// browser profile or expose a debugging port. Playwright uses a private pipe.
+// browser profile or expose a debugging port. Manual login runs in a normal
+// browser process; Playwright is used only for post-login billing reads.
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -15,10 +16,11 @@ const PROVIDERS = new Set(['codex','opencode']);
 const CHANNELS = ['msedge','chrome'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
 const STATES = ['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale',
-  'login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
+  'close_login_browser','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
 
 function billingPage(provider,raw) {
   try {
+    if(typeof raw!=='string'||raw.length>512)return null;
     const u=new URL(raw);
     if(u.username||u.password)return null;
     if(provider==='codex'&&u.origin==='https://platform.openai.com'&&
@@ -99,6 +101,23 @@ async function findBrowser(preferred=null,env=process.env,access=fs.access) {
   }
   return null;
 }
+function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:child_process').spawn}) {
+  // The installed browser handles the provider's own OAuth flow. Do not use
+  // Playwright, CDP, automation flags, a shell, or credential extraction here.
+  return new Promise((resolve,reject)=>{
+    let child;
+    try{
+      child=spawn(browser.executablePath,[
+        '--user-data-dir='+profilePath,'--new-window','--disable-background-mode','--disable-sync',url
+      ],{shell:false,detached:true,windowsHide:false,stdio:'ignore',env:browserEnvironment(env)});
+    }catch{reject(new Error('browser_error'));return;}
+    child.once('error',()=>reject(new Error('browser_error')));
+    child.once('spawn',()=>{
+      child.unref();
+      resolve({isRunning:()=>child.exitCode===null&&child.signalCode===null});
+    });
+  });
+}
 function loadChromium(pluginFolder) {
   if(!pluginFolder)throw new Error('runtime_missing');
   // Load only the packaged dependency, not arbitrary modules from PATH or the
@@ -114,8 +133,9 @@ function bounded(promise,ms) {
 }
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,clock=Date.now,
-  io=fs,chromiumLoader=()=>loadChromium(pluginFolder),browserFinder=findBrowser,env=process.env}={}) {
-  const interactive=new Map(),busy=new Map(),contexts=new Set();
+  io=fs,chromiumLoader=()=>loadChromium(pluginFolder),browserFinder=findBrowser,
+  loginLauncher=startLoginBrowser,env=process.env}={}) {
+  const manual=new Map(),busy=new Map(),contexts=new Set();
   let stopped=false,timer=null,tickBusy=false;
   const folder=account=>path.join(directory,crypto.createHash('sha256').update(account.provider+':'+account.id).digest('hex'));
   const bindingFile=account=>path.join(folder(account),'binding.json');
@@ -153,14 +173,14 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     try{await bounded(context.close(),10000);contexts.delete(context);}
     catch{throw new Error('browser_error');}
   }
-  async function launch(account,browser,headless){
+  async function launch(account,browser){
     let chromium;
     try{chromium=chromiumLoader();if(!chromium?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
     try{await io.mkdir(profile(account,browser.channel),{recursive:true,mode:0o700});}
     catch{throw new Error('profile_error');}
     let context;
     try{context=await chromium.launchPersistentContext(profile(account,browser.channel),{
-      channel:browser.channel,executablePath:browser.executablePath,headless,
+      channel:browser.channel,executablePath:browser.executablePath,headless:true,
       viewport:null,acceptDownloads:false,chromiumSandbox:true,timeout:15000,
       handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,
       args:['--disable-background-mode','--disable-sync'],env:browserEnvironment(env)
@@ -199,85 +219,101 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }while(Date.now()<until);
     return {state:expected?(context.pages().some(p=>billingPage(account.provider,p.url())===expected)?'balance_unavailable':'login_required'):'confirmation_unavailable'};
   }
-  async function open(account){
-    const existing=interactive.get(account.id);
-    if(existing){
-      try{await existing.context.pages()[0]?.bringToFront();}catch{}
-      return publish(account,'awaiting_confirmation');
+  async function navigateBilling(context,account,url){
+    const page=context.pages()[0]||await context.newPage();
+    let blocked=false;
+    await page.route('**/*',async route=>{
+      const request=route.request();
+      if(request.isNavigationRequest()){
+        let main=true;
+        try{main=request.frame()===page.mainFrame();}catch{}
+        if(main&&!billingPage(account.provider,request.url())){
+          blocked=true;return route.abort();
+        }
+      }
+      return route.continue();
+    });
+    try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:15000});}
+    catch(e){
+      if(blocked||!billingPage(account.provider,page.url()))return {state:'login_required'};
+      throw e;
     }
+    if(blocked)return {state:'login_required'};
+    // Only evaluate the expected billing document; never interact with OAuth,
+    // sign-in, verification or any other non-billing page.
+    return readPage(context,account,url);
+  }
+  async function open(account){
+    const existing=manual.get(account.id);
+    if(existing?.process.isRunning())return publish(account,'awaiting_confirmation');
     const old=await readBinding(account);
-    let browser;
     try{
-      // Diagnose a missing runtime before looking for installed browsers.
+      // Check availability without launching an automated browser.
       try{if(!chromiumLoader()?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
-      browser=await browserFinder(old?.channel??null,env);
-      if(!browser&&old)browser=await browserFinder(null,env);
+      let browser=await browserFinder(existing?.browser.channel??old?.channel??null,env);
+      if(!browser&&(existing||old))browser=await browserFinder(null,env);
       if(!browser)throw new Error('browser_missing');
-      // Invalidate the old association before permitting account/workspace changes.
       await io.rm(bindingFile(account),{force:true}).catch(()=>{throw new Error('profile_error');});
       await publish(account,'connecting');
-      const context=await launch(account,browser,false);
-      const record={context,channel:browser.channel};
-      interactive.set(account.id,record);
-      context.once('close',()=>{
-        if(interactive.get(account.id)!==record)return;
-        interactive.delete(account.id);
-        if(!stopped)void publish(account,'login_required').catch(()=>{});
-      });
-      try{
-        const page=context.pages()[0]||await context.newPage();
-        await page.goto(old?.url||ENTRY[account.provider],{waitUntil:'domcontentloaded',timeout:15000});
-      }catch{/* Manual navigation in the visible window is still possible. */}
-      if(interactive.get(account.id)===record)return publish(account,'awaiting_confirmation');
-      return store.cached();
+      const profilePath=profile(account,browser.channel);
+      try{await io.mkdir(profilePath,{recursive:true,mode:0o700});}
+      catch{throw new Error('profile_error');}
+      const url=existing?.url||old?.url||ENTRY[account.provider];
+      const process=await loginLauncher({browser,profilePath,url,env});
+      manual.set(account.id,{browser,process,url});
+      return publish(account,'awaiting_confirmation');
     }catch(e){return publish(account,safeError(e));}
   }
-  async function confirm(account){
-    const record=interactive.get(account.id);
+  async function confirm(account,rawPage){
+    const record=manual.get(account.id);
     if(!record)return publish(account,'login_required');
+    if(record.process.isRunning())return publish(account,'close_login_browser');
+    const url=billingPage(account.provider,rawPage);
+    if(!url)return publish(account,'confirmation_unavailable');
+    let context,result;
     try{
-      const result=await readPage(record.context,account,null,4000);
-      if(result.state!=='ok'||interactive.get(account.id)!==record)return publish(account,'confirmation_unavailable');
+      // No browser process is killed or attached to. If Chromium reports
+      // that the profile remains in use, the user must close it manually.
+      context=await launch(account,record.browser);
+      result=await navigateBilling(context,account,url);
+      await closeContext(context);context=null;
       if(!await current(account.id))throw new Error('profile_error');
-      interactive.delete(account.id);
-      await closeContext(record.context);
-      if(!await current(account.id))throw new Error('profile_error');
-      await saveBinding(account,{channel:record.channel,url:result.url});
+      if(result.state!=='ok')return publish(account,result.state==='login_required'?'login_required':'confirmation_unavailable');
+      await saveBinding(account,{channel:record.browser.channel,url:result.url});
+      manual.delete(account.id);
       return publish(account,'ok',{amount:result.amount,checkedAt:clock()});
     }catch(e){return publish(account,safeError(e));}
+    finally{if(context)await closeContext(context).catch(()=>{});}
   }
   async function disconnect(account){
-    const record=interactive.get(account.id);
-    interactive.delete(account.id);
+    const record=manual.get(account.id);
     try{
-      if(record)await closeContext(record.context);
+      if(record?.process.isRunning())return publish(account,'disconnect_error');
       // Remove only this plugin's dedicated, hashed account directory.
       await io.rm(folder(account),{recursive:true,force:true});
+      manual.delete(account.id);
       return store.setBillingSession(account.id,account.provider,null);
     }catch{
-      // Stop automatic refresh even if deleting browser files fails.
       await io.rm(bindingFile(account),{force:true}).catch(()=>{});
       return publish(account,'disconnect_error');
     }
   }
   async function refreshAccount(account){
     const initialState=stateFor(await store.cached(),account.id,account.provider);
-    if(initialState?.state==='disconnect_error')return;
+    if(['disconnect_error','login_required'].includes(initialState?.state))return;
     const binding=await readBinding(account);
     if(!binding){
       const state=stateFor(await store.cached(),account.id,account.provider);
       if(Number.isFinite(state?.amount))await store.setBillingSession(account.id,account.provider,null);
-      else if(['connecting','awaiting_confirmation','confirmation_unavailable'].includes(state?.state))await publish(account,'login_required');
+      else if(['connecting','awaiting_confirmation','confirmation_unavailable','close_login_browser'].includes(state?.state))await publish(account,'login_required');
       return;
     }
     let context;
     try{
       const browser=await browserFinder(binding.channel,env);
       if(!browser)throw new Error('browser_missing');
-      context=await launch(account,browser,true);
-      const page=context.pages()[0]||await context.newPage();
-      await page.goto(binding.url,{waitUntil:'domcontentloaded',timeout:15000});
-      const result=await readPage(context,account,binding.url);
+      context=await launch(account,browser);
+      const result=await navigateBilling(context,account,binding.url);
       if(!await current(account.id))return;
       if(result.state==='ok')await publish(account,'ok',{amount:result.amount,checkedAt:clock()});
       else await publish(account,result.state,{preserve:true});
@@ -294,7 +330,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }).finally(()=>{if(busy.get(account.id)===task)busy.delete(account.id);});
     busy.set(account.id,task);return task;
   }
-  async function action(id,verb){
+  async function action(id,verb,page=''){
     const reply=async(accepted,reason=null)=>({accepted,reason,snapshot:await store.cached()});
     if(stopped)return reply(false,'service_unavailable');
     if(!['open','confirm','disconnect'].includes(verb))return reply(false,'invalid_action');
@@ -306,11 +342,12 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }
     const account=snapshot.accounts.find(a=>a.id===id&&eligible(a));
     if(!account)return reply(false,'account_unavailable');
+    if(verb==='confirm'&&!billingPage(account.provider,page))return reply(false,'invalid_billing_page');
     try{
       let executed=false;
       await run(account,async()=>{
         executed=true;
-        return verb==='open'?open(account):verb==='confirm'?confirm(account):disconnect(account);
+        return verb==='open'?open(account):verb==='confirm'?confirm(account,page):disconnect(account);
       },true);
       return executed?reply(true):reply(false,'account_unavailable');
     }catch{return reply(false,'action_failed');}
@@ -323,14 +360,11 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       // Do not poll removed accounts or an inventory known to be incomplete.
       if(snapshot.inventoryWarning)return;
       const connected=new Set(snapshot.accounts.filter(eligible).map(a=>a.id));
-      for(const [id,record] of interactive){
-        if(connected.has(id))continue;
-        interactive.delete(id);
-        await closeContext(record.context).catch(()=>{});
-      }
+      // Never close or kill a user-controlled login browser.
+      for(const id of manual.keys())if(!connected.has(id))manual.delete(id);
       for(const account of snapshot.accounts.filter(eligible)){
         if(stopped)break;
-        if(interactive.has(account.id)||busy.has(account.id))continue;
+        if(manual.has(account.id)||busy.has(account.id))continue;
         if(!await current(account.id))continue;
         await run(account,()=>refreshAccount(account)).catch(()=>{});
       }
@@ -346,13 +380,13 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   }
   async function stop(){
     stopped=true;if(timer)clearInterval(timer);timer=null;
-    interactive.clear();
+    manual.clear();
     await Promise.allSettled([...contexts].map(c=>closeContext(c)));
     await Promise.allSettled([...busy.values()]);
   }
   return {action,tick,start,stop};
 }
-const COMMAND_ERRORS=new Set(['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed']);
+const COMMAND_ERRORS=new Set(['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','invalid_billing_page','action_failed']);
 function createBillingCommands(service,{log=()=>{}}={}) {
   const active=new Map(),results=new Map();
   let stopped=false;
@@ -363,11 +397,13 @@ function createBillingCommands(service,{log=()=>{}}={}) {
     if(results.size>80)results.delete(results.keys().next().value);
     try{log(result);}catch{}
   };
-  function submit({id,action,ticket}={}) {
+  function submit({id,action,ticket,page=''}={}) {
     if(stopped)return 'service_unavailable';
     if(typeof id!=='string'||!id||id.length>120||
       typeof ticket!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(ticket)||
-      !['open','confirm','disconnect'].includes(action))return 'invalid_action';
+      !['open','confirm','disconnect'].includes(action)||
+      typeof page!=='string'||page.length>512||(action!=='confirm'&&page!=='')||
+      (action==='confirm'&&!billingPage('codex',page)&&!billingPage('opencode',page)))return 'invalid_action';
     const running=active.get(id);
     if(running)return running.ticket===ticket?'queued':'busy';
     if(active.size>=80)return 'busy';
@@ -377,7 +413,7 @@ function createBillingCommands(service,{log=()=>{}}={}) {
     record(id,ticket,'pending');
     // Do not keep the host IPC invocation open during browser startup, network
     // navigation or a credential refresh. The main service owns this task.
-    entry.task=Promise.resolve().then(()=>stopped?null:service.action(id,action)).then(result=>{
+    entry.task=Promise.resolve().then(()=>stopped?null:service.action(id,action,page)).then(result=>{
       if(stopped)return;
       record(id,ticket,result?.accepted===true?'accepted':
         COMMAND_ERRORS.has(result?.reason)?result.reason:'action_failed');
@@ -393,4 +429,4 @@ function createBillingCommands(service,{log=()=>{}}={}) {
   function stop(){stopped=true;results.clear();}
   return {submit,status,stop};
 }
-module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,findBrowser,createBillingSessions,createBillingCommands,STATES};
+module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,findBrowser,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};

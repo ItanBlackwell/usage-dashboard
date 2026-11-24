@@ -35,9 +35,9 @@ const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),orga
 const Metrics = Ipc.define({id:'usage-dashboard.metrics.v2',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 // Version independently from the metrics contract. Older host clients may
 // retain method tables for an existing token across plugin reloads.
-const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v2',methods:{
+const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v3',methods:{
   ping:{output:Schema.String},
-  submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String}),output:Schema.String},
+  submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String,page:Schema.String}),output:Schema.String},
   status:{input:Schema.Struct({id:Schema.String,ticket:Schema.String}),output:Schema.String}
 }});
 
@@ -63,7 +63,7 @@ const visualIntents = new Map();
 let latestSelectedID=null;
 // Retain the last authoritative main-process snapshot across popup lifetimes.
 let latestVerifiedSnapshot=null;
-const billingUiPending=new Set(),billingUiErrors=new Map();
+const billingUiPending=new Set(),billingUiErrors=new Map(),billingPageDrafts=new Map();
 let billingTicketSequence=0;
 const billingUiListeners=new Set();
 function updateBillingUi(){for(const fn of billingUiListeners){try{fn();}catch{}}}
@@ -216,11 +216,12 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   const status=session?.state;
   const text={
     connecting:tr('Opening isolated browser…','Открывается отдельный браузер…'),
-    awaiting_confirmation:tr('Sign in, select the matching organization/workspace, open Billing, then confirm.','Войди, выбери нужную организацию/workspace, открой Billing и подтверди.'),
-    confirmation_unavailable:tr('Balance not recognized. Open the correct Billing page.','Баланс не распознан. Открой нужную страницу Billing.'),
+    awaiting_confirmation:tr('Sign in in the normal browser, open the matching Billing page, copy its address and close the login window.','Войди в обычном браузере, открой нужную страницу Billing, скопируй адрес и закрой окно входа.'),
+    confirmation_unavailable:tr('Balance not recognized. Check the copied Billing address and retry.','Баланс не распознан. Проверь адрес Billing и повтори.'),
+    close_login_browser:tr('Close all windows of this separate login profile, then confirm.','Закрой все окна отдельного профиля входа, затем подтверди.'),
     ok:tr('Billing connected','Billing подключён'),
     stale:tr('Last confirmed balance','Последний подтверждённый баланс'),
-    login_required:tr('Billing sign-in required','Требуется вход в Billing'),
+    login_required:tr('Sign-in required. Reconnect in the normal browser.','Требуется вход. Переподключи Billing в обычном браузере.'),
     balance_unavailable:tr('Billing balance unavailable','Баланс Billing недоступен'),
     runtime_missing:tr('Billing runtime missing. Reinstall the plugin.','Нет модуля Billing. Переустанови плагин.'),
     browser_missing:tr('Microsoft Edge or Google Chrome required.','Нужен Microsoft Edge или Chrome.'),
@@ -236,6 +237,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     inventory_unavailable:tr('Account inventory unavailable. Refresh and retry.','Список учётных данных недоступен. Обнови и повтори.'),
     account_unavailable:tr('Account not available to Billing. Refresh and retry.','Аккаунт недоступен службе Billing. Обнови и повтори.'),
     invalid_action:tr('Unsupported Billing action.','Действие Billing не поддерживается.'),
+    invalid_billing_page:tr('Paste the correct provider Billing page address.','Вставь корректный адрес страницы Billing этого провайдера.'),
     action_failed:tr('Billing action failed. Retry.','Действие Billing завершилось ошибкой. Повтори.'),
     ipc_unavailable:tr('Billing IPC client missing [B01].','Клиент IPC Billing отсутствует [B01].'),
     ipc_ping_failed:tr('Billing service did not accept the connection [B02].','Служба Billing не отвечает на проверку связи [B02].'),
@@ -248,25 +250,45 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   };
   const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
   line.setAttribute('data-pv-billing-session',status||'disconnected');
-  const waiting=['awaiting_confirmation','confirmation_unavailable'].includes(status);
+  const waiting=['awaiting_confirmation','confirmation_unavailable','close_login_browser','profile_busy'].includes(status);
   const busy=pending||status==='connecting';
   const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
   if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback));
+  let pageInput=null;
+  if(waiting){
+    pageInput=add(line,$('input','box-sizing:border-box;flex:1 1 100%;min-width:0;width:100%;height:22px;min-height:22px;padding:0 5px;font:inherit;font-size:10px;border:1px solid '+palette.border+';border-radius:4px;color:'+palette.text+';background:transparent'));
+    pageInput.type='text';pageInput.maxLength=512;pageInput.autocomplete='off';pageInput.spellcheck=false;
+    pageInput.placeholder=tr('Paste Billing page URL','Вставь адрес страницы Billing');
+    pageInput.setAttribute('aria-label',pageInput.placeholder);
+    pageInput.setAttribute('data-pv-billing-page',account.id);
+    pageInput.value=billingPageDrafts.get(account.id)||'';
+    pageInput.disabled=!!busy;
+    pageInput.addEventListener('input',()=>{
+      // Only the canonical allowlisted billing address is retained in memory.
+      const canonical=billing.billingPage(account.provider,pageInput.value.trim());
+      if(canonical)billingPageDrafts.set(account.id,canonical);
+      else billingPageDrafts.delete(account.id);
+    });
+  }
   const button=(verb,label,tooltip)=>{
     const el=add(line,$('button','box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:auto;height:18px;min-height:18px;max-height:18px;line-height:12px;border:1px solid '+palette.border+';border-radius:4px;background:transparent;color:'+palette.text+';font-family:inherit;font-size:10px;font-weight:400;padding:0 5px;margin:0;cursor:pointer;white-space:nowrap;appearance:none',label));
     el.type='button';el.title=tooltip;el.disabled=!onBilling||busy;
     el.setAttribute('data-pv-billing-action',verb);
-    el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb);});
+    el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb,verb==='confirm'?(pageInput?.value||''):'');});
   };
   if(waiting){
-    button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only if the visible Billing organization or workspace matches this API key.','Подтверди только если организация или workspace на Billing соответствует этому API-ключу.'));
-    button('open',tr('Open browser','Открыть браузер'),tr('Return to the separate billing browser.','Вернуться в отдельный браузер Billing.'));
+    button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only after closing the login browser and checking that the copied Billing page matches this API key.','Подтверди только после закрытия окна входа и проверки соответствия адреса Billing этому API-ключу.'));
+    button('open',tr('Open browser','Открыть браузер'),tr('Reopen the normal login browser if needed.','Повторно открыть обычный браузер для входа.'));
   }else{
     button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open a separate billing profile for this account.','Открыть отдельный профиль Billing для этого аккаунта.'));
   }
   if(status)button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
 }
 function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder=null,onBilling=null,billingPending=null) {
+  // Do not destroy the URL input while the user is typing or pasting.
+  // The next poll or explicit action updates the rest of the card.
+  const focused=typeof document!=='undefined'?document.activeElement:null;
+  if(focused?.hasAttribute?.('data-pv-billing-page')&&target.contains(focused))return;
   empty(target);
   const all=presentation.connectedSubscriptions(data).concat(presentation.connectedApiKeys(data));
   // Preserve first-seen order. Switching cannot move cards even if the host
@@ -446,6 +468,10 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       snapshot=presentation.mergeInventoryFallback(snapshot,lastServerSnapshot||latestVerifiedSnapshot);
     }
     lastSnapshot=applyDesired(snapshot);
+    for(const id of billingPageDrafts.keys()){
+      if(!snapshot.accounts?.some(a=>a.id===id)||snapshot.billingSessions?.some(s=>s.id===id&&s.state==='ok'))
+        billingPageDrafts.delete(id);
+    }
     hasData=!!(snapshot.accounts?.length||snapshot.organizations?.length||snapshot.checkedAt);
     renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
   };
@@ -498,11 +524,14 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       if(queuedRefresh && alive){queuedRefresh=false;void load(true);}
     }
   }
-  async function billingAction(id,action){
+  async function billingAction(id,action,rawPage=''){
     if(!alive||billingPending.has(id)||!lastSnapshot)return;
     const account=lastSnapshot.accounts?.find(a=>a.id===id&&a.kind==='api'&&['codex','opencode'].includes(a.provider));
     if(!account)return;
     billingUiErrors.delete(id);
+    const page=action==='confirm'?billing.billingPage(account.provider,rawPage.trim()):'';
+    if(action==='confirm'&&!page){billingUiErrors.set(id,'invalid_billing_page');updateBillingUi();return;}
+    if(action==='disconnect')billingPageDrafts.delete(id);
     if(!billingClient||['ping','submit','status'].some(k=>typeof billingClient[k]!=='function')){
       billingUiErrors.set(id,'ipc_unavailable');updateBillingUi();return;
     }
@@ -511,9 +540,9 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     let stage='ping';
     try{
       const version=await bounded(signal=>billingClient.ping({signal}),8000);
-      if(version!=='billing-v2'){billingUiErrors.set(id,'ipc_protocol');return;}
+      if(version!=='billing-v3'){billingUiErrors.set(id,'ipc_protocol');return;}
       stage='submit';
-      const ack=await bounded(signal=>billingClient.submit({id,action,ticket},{signal}),10000);
+      const ack=await bounded(signal=>billingClient.submit({id,action,ticket,page},{signal}),10000);
       if(ack!=='queued'){
         billingUiErrors.set(id,['service_unavailable','invalid_action','busy'].includes(ack)?ack:'ipc_protocol');return;
       }
@@ -525,7 +554,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
           await new Promise(resolve=>setTimeout(resolve,500));
           continue;
         }
-        if(result!=='accepted')billingUiErrors.set(id,['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed','unknown'].includes(result)?result:'ipc_protocol');
+        if(result!=='accepted')billingUiErrors.set(id,['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','invalid_billing_page','action_failed','unknown'].includes(result)?result:'ipc_protocol');
         return;
       }
       billingUiErrors.set(id,'ipc_timeout');
@@ -939,11 +968,11 @@ exports.default=Plugin.define({
     // scalar acknowledgements/statuses. Failures must not disable metrics.
     try{
       ctx.provide(BillingCommands,{
-        ping:()=> 'billing-v2',
+        ping:()=> 'billing-v3',
         submit:input=>billingCommands.submit(input),
         status:input=>billingCommands.status(input)
       });
-      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v2'});}catch{}
+      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v3'});}catch{}
     }catch{
       try{ctx.log?.write?.('warn','Usage Dashboard Billing IPC registration failed',{code:'B02'});}catch{}
     }

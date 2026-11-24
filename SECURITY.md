@@ -20,10 +20,13 @@ and the potential impact. Redact all secrets and private account data.
 - Provider credentials remain in the OpenCode host process; GUI receives only
   sanitized usage metadata.
 - Billing Session uses dedicated per-account browser profiles, never a user's
-  existing browser profile. Manual login and account confirmation are required.
-  Provider pages return only a sanitized amount to the plugin. Browser
-  authentication remains in private local browser storage, and private billing
-  URLs remain in local bindings. Browser sandboxing is retained.
+  existing browser profile. Manual login takes place in an ordinary browser
+  with no automation connection. Only after the user closes that window and
+  confirms an allowlisted Billing page address are headless reads attempted.
+  Authentication remains in private local browser storage. The user-supplied
+  canonical Billing URL is retained in a local binding, not the metrics cache.
+  No automated sign-in, credential extraction or verification bypass is used.
+  Provider pages return only a sanitized amount; browser sandboxing is retained.
 - Billing Session requires no browser extension, pairing token or local HTTP
   receiver.
 - No billing snapshots, browser profiles or environment secrets are distributed

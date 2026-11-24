@@ -48,12 +48,16 @@ Chrome is used if Edge is not installed. No Developer mode or browser extension
 is necessary. **Manual authorization is still required:**
 
 1. Restart OpenCode and click **Connect Billing** on the OpenAI API or Zen API card.
-2. In the separate browser window, sign in and select the matching organization
-   or workspace. Open its Billing page.
-3. Return to the popup and click **Confirm account** after verifying that the
-   billing account owns the connected API key.
+2. In the separate normal browser window, sign in yourself (including Google
+   sign-in if offered by the provider). Select the matching organization or
+   workspace and open its Billing page.
+3. Copy the Billing page address and close all windows of that separate login
+   profile. Return to the popup, paste the address and click **Confirm account**.
+   Verify that the billing account owns the connected API key first.
 
-The plugin then attempts periodic background reads using that isolated session.
+Only after manual sign-in is complete does the plugin attempt automated,
+headless balance reads using that isolated session. Authentication is never
+performed by Playwright.
 If login expires, reconnect manually. The experimental page reader may fail if
 the provider changes its site. See [Billing Session setup](docs/BILLING_SESSION.md).
 The previous browser companion is no longer supported. If you installed it

@@ -21,17 +21,21 @@ runtime manifest rather than directly deserializing npm's lockfile.
 ## Required manual authorization
 
 1. Open Usage Dashboard, locate the OpenAI API or OpenCode API card, and
-   select **Connect Billing**. An isolated browser window opens.
-2. Sign in yourself, including any provider security checks or MFA.
+   select **Connect Billing**. A normal browser window opens using a dedicated
+   profile, with no Playwright or debugging connection during authorization.
+2. Sign in yourself, including any provider security checks, Google sign-in
+   if offered by the provider, or MFA. Do not enable browser sync.
    Select the organization or workspace that actually owns the connected API key.
 3. Open the Billing page. For OpenAI, use
    [Billing overview](https://platform.openai.com/settings/organization/billing/overview).
    For Zen, select the workspace in [OpenCode Console](https://opencode.ai/console)
    and open its Billing settings.
-4. Return to Usage Dashboard and select **Confirm account** only after checking
-   that the page corresponds to this API key. Reopen the popup if it closed.
-   A recognized explicit balance (including zero) is saved. The browser window
-   then closes. Keep only one matching Billing page in that isolated window.
+4. Verify that the page corresponds to this API key. Copy its address and
+   close **all windows of the dedicated login profile**. Do not close unrelated
+   browser profiles. Return to Usage Dashboard and paste the address into the
+   Billing field, then select **Confirm account**. Reopen the popup if needed.
+   The plugin now attempts a headless read of that specific Billing page using
+   the existing session. A recognized explicit balance (including zero) is saved.
 5. Subsequent reads happen in a headless browser on the configured refresh
    interval, while OpenCode Desktop is running. A manual refresh also requests
    a billing update. The browser is closed after each read.
@@ -50,9 +54,16 @@ client, failed connection check, rejected command, unavailable status and
 protocol mismatch. If an IPC code persists, report that code and the OpenCode
 Desktop version. Main-process diagnostics record only fixed command outcomes.
 
-- If login expires or the provider requires interactive verification, select
-  **Reconnect Billing** and sign in manually again. No verification bypass
-  is attempted.
+- Google and other identity providers may reject automated browsers.
+  Sign-in is performed in the ordinary browser window; the plugin does not
+  automate authentication, modify browser security settings, or attempt to
+  bypass verification. If sign-in is still refused, use another login method
+  officially offered for the same provider account, or leave Billing disconnected.
+- If the session expires, headless access is denied, or the provider requires
+  interactive verification, select **Reconnect Billing** and sign in manually.
+  If the provider does not permit headless reads, the balance remains unavailable.
+- If the login browser is still open, close its dedicated windows and retry
+  confirmation. The plugin never terminates your login browser.
 - If no unambiguous amount is visible, the plugin does not assume zero.
   Check the correct organization/workspace and billing permissions. A redesign
   or localization of the page can make the experimental extractor unavailable.
@@ -68,12 +79,15 @@ Desktop version. Main-process diagnostics record only fixed command outcomes.
 The browser handles sign-in and stores its own session in the dedicated
 `.usage-dashboard-userdata/billing-sessions` directory under the OpenCode
 configuration root. Browser storage contains sensitive authentication data.
-Do not copy, publish or share this directory. No cookies, tokens, raw page
-content, or private billing URLs are sent to the renderer or included in the
-metrics cache. Only a sanitized account ID, status, amount and timestamp are
-published. The private local binding retains the selected billing URL.
-The browser runs with its sandbox enabled and a private automation pipe;
-no external debugging listener or personal browser profile is used.
+Do not copy, publish or share this directory. No cookies, tokens or raw page
+content are sent to the renderer or included in the metrics cache. Only a
+sanitized account ID, status, amount and timestamp are published. The
+user-pasted Billing URL is validated against fixed provider origins and
+Billing paths, stripped of unrelated query parameters and retained only in
+the private local binding. The ordinary login browser has no automation
+connection. Subsequent headless reads use a private automation pipe and
+retain browser sandboxing. No external debugging listener or personal
+browser profile is used.
 
 Normal uninstall preserves local user data for reinstall. To remove saved
 billing sessions, disconnect them first or run the uninstaller with
