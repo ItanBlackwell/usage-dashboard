@@ -26,8 +26,8 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { throw "Invalid PowerShell: $($_.Name): $($errors -join '; ')" }
           }
-      - name: Install and uninstall in isolated directory
-        shell: pwsh
+      - name: Install and uninstall in isolated directory (Windows PowerShell 5.1)
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $env:OPENCODE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'usage-dashboard-release-smoke'

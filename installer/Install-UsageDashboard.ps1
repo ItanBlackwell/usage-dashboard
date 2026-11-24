@@ -47,8 +47,10 @@ try {
     }
     if (-not $SkipBillingRuntime) {
         try {
-            $lock = Get-Content -LiteralPath (Join-Path $PackageRoot 'package-lock.json') -Raw | ConvertFrom-Json
-            $pin = $lock.packages.'node_modules/playwright-core'
+            # npm lockfile v3 includes an empty root key, which Windows
+            # PowerShell 5.1 cannot deserialize. Use the validated flat pin.
+            $pin = Get-Content -LiteralPath (Join-Path $PackageRoot 'billing-runtime.json') -Raw | ConvertFrom-Json
+            if ($pin.name -cne 'playwright-core' -or $pin.version -cne $package.optionalDependencies.'playwright-core') { throw 'Billing runtime pin does not match the package' }
             if ($pin.version -notmatch '^\d+\.\d+\.\d+$' -or
                 $pin.resolved -cne "https://registry.npmjs.org/playwright-core/-/playwright-core-$($pin.version).tgz" -or
                 $pin.integrity -notmatch '^sha512-[A-Za-z0-9+/]+={0,2}$') { throw 'Invalid Billing runtime lock' }
@@ -60,7 +62,8 @@ try {
             if ((Test-Path -LiteralPath $receipt -PathType Leaf) -and (Test-Path -LiteralPath $runtimeManifest -PathType Leaf)) {
                 try {
                     $installed = ((Get-Content -LiteralPath $receipt -Raw).Trim() -ceq $pin.integrity) -and
-                        ((Get-Content -LiteralPath $runtimeManifest -Raw | ConvertFrom-Json).version -ceq $pin.version)
+                        ((Get-Content -LiteralPath $runtimeManifest -Raw | ConvertFrom-Json).version -ceq $pin.version) -and
+                        (Test-Path -LiteralPath (Join-Path $runtime 'index.js') -PathType Leaf)
                 } catch {}
             }
             if (-not $installed) {
@@ -98,7 +101,7 @@ try {
                     }
                 } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
             }
-            Write-Host "Billing runtime $($pin.version) installed."
+            Write-Host "Billing runtime $($pin.version) installed and ready for browser launch." -ForegroundColor Green
         } catch {
             Write-Warning "Billing runtime unavailable: $($_.Exception.Message). Direct API monitoring remains installed. Re-run Install.cmd to retry."
         }

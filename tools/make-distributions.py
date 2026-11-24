@@ -17,7 +17,11 @@ release = ROOT / 'release'
 release.mkdir(exist_ok=True)
 
 lock = json.loads((ROOT / 'package-lock.json').read_text(encoding='utf-8'))
-pin = lock['packages']['node_modules/playwright-core']
+locked = lock['packages']['node_modules/playwright-core']
+pin = json.loads((ROOT / 'billing-runtime.json').read_text(encoding='utf-8'))
+pkg = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))
+if pin.get('name') != 'playwright-core' or any(pin.get(k) != locked.get(k) for k in ('version', 'resolved', 'integrity')) or pkg['optionalDependencies']['playwright-core'] != pin['version']:
+    raise RuntimeError('Billing runtime pin does not match package lock')
 runtime_url = f"https://registry.npmjs.org/playwright-core/-/playwright-core-{pin['version']}.tgz"
 if pin['resolved'] != runtime_url:
     raise RuntimeError('Unexpected Billing runtime URL')
@@ -30,7 +34,7 @@ if integrity != pin['integrity']:
     raise RuntimeError('Billing runtime integrity check failed')
 
 portable_files = (
-    'package.json', 'package-lock.json', 'dist/gui-experimental.cjs',
+    'package.json', 'package-lock.json', 'billing-runtime.json', 'dist/gui-experimental.cjs',
     'browser-extension/manifest.json', 'browser-extension/background.js',
     'browser-extension/content.js',
     'installer/Common.ps1', 'installer/Install-UsageDashboard.ps1',

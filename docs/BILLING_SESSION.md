@@ -13,7 +13,10 @@ The Portable ZIP contains a pinned Playwright Core runtime; no separate Node.js,
 browser extension or Developer mode is required. The source ZIP installer
 downloads the same locked npm archive and verifies its SHA-512 integrity.
 If runtime setup fails, direct provider APIs still work; rerun the installer
-after resolving the reported error.
+after resolving the reported error. Verify that the installer reports
+`Billing runtime <version> installed and ready for browser launch.` Windows
+PowerShell 5.1 is supported; the installer reads the flat, integrity-pinned
+runtime manifest rather than directly deserializing npm's lockfile.
 
 ## Required manual authorization
 

@@ -2,6 +2,9 @@
 
 ## 0.13.0 (unreleased)
 
+- Fix Billing runtime installation on Windows PowerShell 5.1 by using a flat
+  runtime pin validated against the npm lockfile during packaging.
+
 - Add extension-free, account-scoped Billing Session for OpenAI API and OpenCode
   Zen with manual login, background refresh, reconnection and profile removal.
 - Prepare an integrity-pinned Playwright Core runtime in Portable installation;

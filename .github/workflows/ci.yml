@@ -70,6 +70,7 @@ jobs:
                   assert not any('billing-sessions/' in name or '.usage-dashboard-userdata/' in name for name in names)
                   if kind == 'Portable':
                       assert 'Usage-Dashboard/vendor/playwright-core.tgz' in names
+                      assert 'Usage-Dashboard/billing-runtime.json' in names
           PYCODE
       - uses: actions/upload-artifact@v4
         with:
@@ -109,8 +110,8 @@ jobs:
           if ($browser.Executable -ne $chrome -or $browser.ExtensionsUrl -ne 'chrome://extensions') { throw 'Chrome fallback failed' }
           Remove-Item -LiteralPath $chrome
           if ($null -ne (Get-BillingBrowser -InstallRoots @($fixture) -SkipRegistry)) { throw 'Unexpected browser detected' }
-      - name: Clean-room installation and removal smoke check
-        shell: pwsh
+      - name: Clean-room installation and removal smoke check (Windows PowerShell 5.1)
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $env:OPENCODE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'usage-dashboard-smoke'
@@ -123,8 +124,11 @@ jobs:
           }
           $runtime = Join-Path $target 'node_modules/playwright-core/package.json'
           if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) { throw 'Billing runtime missing' }
-          $pin = (Get-Content package-lock.json -Raw | ConvertFrom-Json).packages.'node_modules/playwright-core'
+          $pin = Get-Content billing-runtime.json -Raw | ConvertFrom-Json
           if ((Get-Content -LiteralPath $runtime -Raw | ConvertFrom-Json).version -cne $pin.version) { throw 'Wrong Billing runtime' }
+          $env:USAGE_DASHBOARD_SMOKE_PLUGIN = $target
+          node -e "const path=require('node:path');const p=require(path.join(process.env.USAGE_DASHBOARD_SMOKE_PLUGIN,'node_modules','playwright-core'));if(typeof p.chromium?.launchPersistentContext!=='function')process.exit(1)"
+          if ($LASTEXITCODE -ne 0) { throw 'Billing runtime cannot be loaded' }
           $pairing = Join-Path $target 'browser-extension/pairing.json'
           $before = [IO.File]::ReadAllText($pairing)
           & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path
