@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Source: https://github.com/ItanBlackwell/usage-dashboard
 [CmdletBinding()]
-param([string]$PackageRoot)
+param([string]$PackageRoot,[switch]$SetupBillingCompanion)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 try {
@@ -78,7 +78,11 @@ try {
     Remove-DuplicatePluginReferences -ConfigRoot $root
     Write-Host "Usage Dashboard $($package.version) installed: $target" -ForegroundColor Green
     Write-Host 'Restart OpenCode Desktop. One plugin entry should appear in Settings > Extensions > Plugins.'
-    Write-Host "Optional Chrome/Edge companion folder: $extensions"
+    Write-Host "Optional Edge/Chrome companion folder: $extensions"
+    if ($SetupBillingCompanion) {
+        try { Start-BillingCompanionSetup -ExtensionDirectory $extensions }
+        catch { Write-Warning 'Browser setup could not be completed. The plugin is installed; follow docs/BROWSER_EXTENSION.md manually.' }
+    }
 } catch {
     Write-Error "Usage Dashboard installation failed: $($_.Exception.Message)"
     exit 1

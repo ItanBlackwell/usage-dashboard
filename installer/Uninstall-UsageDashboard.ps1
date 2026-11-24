@@ -29,6 +29,7 @@ try {
         $saved=Join-Path $root '.usage-dashboard-userdata'
         if (Test-Path -LiteralPath $saved) { Remove-Item -LiteralPath $saved -Recurse -Force }
     }
+    Write-Host 'If you loaded Usage Dashboard Billing in Edge or Chrome, remove it from the browser extensions page manually.'
     Write-Host 'Restart OpenCode Desktop. Accounts and other plugins were not changed.'
 } catch {
     Write-Error "Usage Dashboard removal failed: $($_.Exception.Message)"

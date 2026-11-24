@@ -41,6 +41,36 @@ an installed plugin but no indicator appears, check the layout and restart.
 
 See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
 
+### Enable OpenAI and OpenCode Zen API balances (optional browser companion)
+
+`Install.cmd` prepares the Billing companion, creates or preserves its
+local pairing token, copies the installed folder path to the clipboard when
+possible, and opens the extensions page in **Microsoft Edge** (preferred),
+or **Google Chrome** if Edge is not installed. The main plugin works without
+this companion; these two API balances normally remain unknown without it.
+
+**You must still complete these steps manually:**
+
+1. In the selected browser profile, enable **Developer mode** on
+   `edge://extensions` or `chrome://extensions`.
+2. Click **Load unpacked**, paste or select the installed folder shown by
+   the installer (normally
+   `%USERPROFILE%\.config\opencode\plugins\usage-dashboard\browser-extension`).
+   If the same extension is already installed from this folder, click **Reload**
+   instead. Make sure **Usage Dashboard · Billing** is enabled and approve any
+   required site permissions.
+3. Return to the installer and type `O` to open the provider pages (optional).
+   Sign in manually to the matching [OpenAI organization](https://platform.openai.com/settings/organization/billing/overview)
+   and/or [OpenCode Console](https://opencode.ai/console) workspace. In OpenCode
+   Console, choose **Settings → Billing**. Keep one billing tab open per provider.
+4. Restart OpenCode Desktop and refresh the billing tabs if they were open
+   before loading the extension. Pin the extension to see its status badge.
+
+The installer does not bypass browser security or change policies or profiles.
+Use `Install.cmd -SkipBrowserSetup` to install/update without opening the
+browser or changing the clipboard. See [Billing companion setup and troubleshooting](docs/BROWSER_EXTENSION.md)
+for limitations, badge meanings, and manual removal.
+
 ## Compatibility and limits
 
 - **OpenAI/Codex subscription quotas** (5-hour and weekly) require
@@ -54,7 +84,8 @@ See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
   and authorization method.
 - OpenCode Go uses the [official usage endpoint](https://opencode.ai/docs/console/go/#usage)
   for 5-hour, weekly and monthly limits. Connected OpenCode pay-as-you-go
-  accounts are displayed even when their credit balance is unavailable.
+  accounts are displayed even when their credit balance is unavailable; the optional
+  Billing companion can read a visible workspace credit balance.
 - Confirmed zero balances are displayed with two decimal places and currency.
 - Missing data is shown as unavailable, never assumed to mean a zero balance.
   Temporary provider errors preserve the last confirmed API balance.

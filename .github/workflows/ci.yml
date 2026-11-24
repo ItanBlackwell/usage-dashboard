@@ -59,6 +59,25 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { throw "Invalid PowerShell: $($_.Name): $($errors -join '; ')" }
           }
+      - name: Verify Billing browser selection
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./installer/Common.ps1
+          $fixture = Join-Path $env:RUNNER_TEMP 'billing-browser-fixture'
+          $edge = Join-Path $fixture 'Microsoft\Edge\Application\msedge.exe'
+          $chrome = Join-Path $fixture 'Google\Chrome\Application\chrome.exe'
+          foreach ($file in @($edge,$chrome)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $file) | Out-Null
+            New-Item -ItemType File -Force -Path $file | Out-Null
+          }
+          $browser = Get-BillingBrowser -InstallRoots @($fixture) -SkipRegistry
+          if ($browser.Executable -ne $edge -or $browser.ExtensionsUrl -ne 'edge://extensions') { throw 'Edge must take priority' }
+          Remove-Item -LiteralPath $edge
+          $browser = Get-BillingBrowser -InstallRoots @($fixture) -SkipRegistry
+          if ($browser.Executable -ne $chrome -or $browser.ExtensionsUrl -ne 'chrome://extensions') { throw 'Chrome fallback failed' }
+          Remove-Item -LiteralPath $chrome
+          if ($null -ne (Get-BillingBrowser -InstallRoots @($fixture) -SkipRegistry)) { throw 'Unexpected browser detected' }
       - name: Clean-room installation and removal smoke check
         shell: pwsh
         run: |
@@ -68,6 +87,14 @@ jobs:
           if (-not $?) { throw 'Installer failed' }
           $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
           if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing after installation' }
+          foreach ($name in @('manifest.json','background.js','content.js','pairing.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $target "browser-extension/$name") -PathType Leaf)) { throw "Missing installed companion file: $name" }
+          }
+          $pairing = Join-Path $target 'browser-extension/pairing.json'
+          $before = [IO.File]::ReadAllText($pairing)
+          & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path
+          if (-not $?) { throw 'Installer upgrade failed' }
+          if ([IO.File]::ReadAllText($pairing) -cne $before) { throw 'Pairing changed on upgrade' }
           & ./installer/Uninstall-UsageDashboard.ps1 -PurgeCachedData
           if (-not $?) { throw 'Uninstaller failed' }
           if (Test-Path $target) { throw 'Plugin still installed' }

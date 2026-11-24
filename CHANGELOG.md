@@ -2,6 +2,10 @@
 
 ## 0.13.0 (unreleased)
 
+- Prepare optional Billing companion setup from Install.cmd, preferring Edge
+  over Chrome, copying the installed path, and guiding manual browser approval.
+  Preserve pairing on upgrades and support non-interactive installations.
+
 - Correct missing USD symbol in the generated bundle, support the current
   OpenCode Console billing route, and show browser companion delivery status.
 
