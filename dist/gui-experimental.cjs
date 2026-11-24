@@ -919,7 +919,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null});
+const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null});
 const readInterval = (value, fallback=5) => Number.isInteger(value) && value>=1 && value<=120 ? value : fallback;
 function cacheDirectory(env=process.env,home=os.homedir()) {
   return path.join(env.LOCALAPPDATA || path.join(home,'.cache'), 'usage-dashboard');
@@ -959,10 +959,12 @@ function sanitizeSnapshot(value) {
   }));
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
-  const b=value.browserBalance;
-  if(b && b.currency==='USD' && typeof b.usd==='number' && Number.isFinite(b.usd)
-    && typeof b.observedAt==='number' && Number.isFinite(b.observedAt))
-    result.browserBalance={usd:b.usd,currency:'USD',observedAt:b.observedAt,source:'billing-page'};
+  for(const field of ['browserBalance','zenBrowserBalance']){
+    const b=value[field];
+    if(b && b.currency==='USD' && typeof b.usd==='number' && Number.isFinite(b.usd)
+      && typeof b.observedAt==='number' && Number.isFinite(b.observedAt))
+      result[field]={usd:b.usd,currency:'USD',observedAt:b.observedAt,source:'billing-page'};
+  }
   return result;
 }
 function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,clock=Date.now,intervalMinutes=5,onChange=()=>{}}={}) {
@@ -1004,6 +1006,10 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
             const prev=prevById.get(a.id);
             if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length)
               return {...prev,state:'stale'};
+            if(a.state==='error' && !a.balance && prev?.balance &&
+              prev.provider===a.provider && prev.kind===a.kind &&
+              ['request_failed','rate_limited','invalid_payload','invalid_balance'].includes(a.message))
+              return {...a,balance:prev.balance,balances:prev.balances,checkedAt:prev.checkedAt,state:'stale'};
             return a;
           });
         const accounts=incoming.map(a=>activeOverrides.has(a.provider)
@@ -1012,7 +1018,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance});
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance,zenBrowserBalance:previous.zenBrowserBalance});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -1023,7 +1029,9 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
   const cached=async()=>{await init();return sanitizeSnapshot(snapshot);};
   const receiveBalance=async balance=>{
     await init();
-    snapshot=sanitizeSnapshot({...snapshot,browserBalance:balance});
+    const field=balance.provider==='opencode'?'zenBrowserBalance':'browserBalance';
+    if(snapshot[field]?.observedAt>balance.observedAt)return sanitizeSnapshot(snapshot);
+    snapshot=sanitizeSnapshot({...snapshot,[field]:balance});
     inform();
     await write();
     return snapshot;
@@ -1103,12 +1111,11 @@ const safePort = x => Number.isInteger(x) && x >= 1025 && x <= 65535 ? x : DEFAU
 function validBalance(x) {
   return typeof x === 'number' && Number.isFinite(x) && x >= -1_000_000 && x <= 100_000_000;
 }
-function validPage(url) {
-  try {
-    const u = new URL(url);
-    return u.protocol === 'https:' && u.hostname === 'platform.openai.com' &&
-      u.pathname === '/settings/organization/billing/overview';
-  } catch { return false; }
+function validPage(url,provider='codex') {
+  // Zen reports a fixed source marker, never the private workspace URL.
+  return provider==='codex'
+    ? url==='https://platform.openai.com/settings/organization/billing/overview'
+    : provider==='opencode'&&url==='https://opencode.ai/workspace/billing';
 }
 function secretEquals(actual, expected) {
   if (!actual || !expected) return false;
@@ -1153,9 +1160,10 @@ async function createBridge({ pairingPath, onBalance, onError = () => {}, now = 
     request.on('end', () => {
       let doc;
       try { doc = JSON.parse(input); } catch { return send(400); }
-      if (!validBalance(doc?.balanceUsd) || doc.currency !== 'USD' || !validPage(doc.page)) return send(422);
+      const provider=doc?.provider??'codex';
+      if (!validBalance(doc?.balanceUsd) || doc.currency !== 'USD' || !validPage(doc.page,provider)) return send(422);
       // ObservedAt is server time. Never trust browser-supplied timestamps.
-      void Promise.resolve(onBalance({ usd:doc.balanceUsd, currency:'USD', observedAt:now(), source:'billing-page' }))
+      void Promise.resolve(onBalance({ provider, usd:doc.balanceUsd, currency:'USD', observedAt:now(), source:'billing-page' }))
         .then(() => send(204)).catch(() => send(500));
     });
   });
@@ -1256,6 +1264,14 @@ function indicatorWindows(account) {
   }
   return result;
 }
+// Browser readings are workspace/organization scoped, not per-key balances.
+function browserBalanceFor(account,snapshot) {
+  if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
+  const keys=connectedApiKeys(snapshot).filter(a=>a.provider===account.provider);
+  if(keys.length!==1||keys[0].id!==account.id)return null;
+  const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
+  return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
+}
 function indicatorPresentation(account,snapshot) {
   if(!account)return {mode:'unavailable'};
   if(account.kind==='api'){
@@ -1265,10 +1281,7 @@ function indicatorPresentation(account,snapshot) {
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
     // Billing credit is organization-wide: only attach it if exactly one
     // OpenAI API account exists. Never attribute it to two unrelated keys.
-    const apiCount=connectedApiKeys(snapshot).filter(a=>a.provider==='codex').length;
-    const balance=snapshot?.browserBalance;
-    const amount=account.provider==='codex'&&apiCount===1&&balance?.currency==='USD'&&
-      typeof balance.usd==='number'&&Number.isFinite(balance.usd)?balance.usd:null;
+    const amount=browserBalanceFor(account,snapshot)?.usd??null;
     return {mode:'api',amount,currency:'USD'};
   }
   const windows=indicatorWindows(account);
@@ -1281,7 +1294,7 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor };
 
 
 })(__presentation,__presentation.exports);
@@ -1481,7 +1494,7 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
   limitType:Schema.String,checkedAt:Schema.Number });
 const BalanceSchema = Schema.Struct({usd:Schema.Number,currency:Schema.String,observedAt:Schema.Number,source:Schema.String});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,browserBalance:Schema.NullOr(BalanceSchema) });
+  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,browserBalance:Schema.NullOr(BalanceSchema),zenBrowserBalance:Schema.NullOr(BalanceSchema) });
 const Metrics = Ipc.define({id:'usage-dashboard.metrics',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
@@ -1496,7 +1509,7 @@ const $ = (tag, style='', text='') => { const e=document.createElement(tag); e.s
 const add = (parent, el) => { parent.appendChild(el); return el; };
 const empty = parent => parent.replaceChildren();
 const pct = value => `${Math.round(value)}%`;
-const money = value => `$${Number(value).toFixed(2)}`;
+const money = value => `${Number(value).toFixed(2)}`;
 const currencyAmount = (amount,currency) => currency==='CNY'?`¥${Number(amount).toFixed(2)}`:money(amount);
 const snapshotListeners = new Set();
 // Per-desktop-window first-seen order survives closing and reopening the popup.
@@ -1650,8 +1663,6 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
   const accounts=order(presentation.connectedSubscriptions(data));
   const apiAccounts=order(presentation.connectedApiKeys(data));
   const budgets=presentation.availableApiBudgets(data);
-  const balance=data?.browserBalance;
-  const openaiApiCount=apiAccounts.filter(a=>a.provider==='codex').length;
   if(!accounts.length&&!apiAccounts.length&&!budgets.length){
     const initial=!data?.checkedAt;
     const unavailable=data?.inventoryWarning==='credentials_unavailable'||data?.inventoryWarning==='connections_unavailable';
@@ -1694,9 +1705,17 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const card=compactCard(list,account.active);
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
-    const hasBrowserBalance=account.provider==='codex' && openaiApiCount===1 && balance?.currency==='USD' && Number.isFinite(balance.usd);
-    const display=hasOwn?currencyAmount(own.amount,own.currency):(hasBrowserBalance?money(balance.usd):'—');
-    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:hasBrowserBalance?balance.observedAt:null);
+    const balance=presentation.browserBalanceFor(account,data);
+    const display=hasOwn?currencyAmount(own.amount,own.currency):(balance?money(balance.usd):'—');
+    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:balance?.observedAt??null);
+    const amountEl=card.querySelector('[data-pv-api-amount]');
+    const ru=String(ctx.locale?.locale?.()||'en').startsWith('ru');
+    if(amountEl && (!hasOwn||account.state==='stale')){
+      const note=balance?(ru?'Баланс из открытой страницы оплаты; проверьте соответствие аккаунта.':'Balance from the open billing page; verify the matching account.')
+        :hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
+        :ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.';
+      amountEl.title=[note,amountEl.title].filter(Boolean).join('\n');
+    }
     const extras=Array.isArray(account.balances)?account.balances.filter(b=>b && b.kind==='balance' && b.currency!==own?.currency && Number.isFinite(b.amount)):[];
     if(extras.length) add(card,$('div',`margin-top:2px;font-size:10px;color:${palette.muted};font-variant-numeric:tabular-nums`,
       extras.map(b=>currencyAmount(b.amount,b.currency)).join(' · ')));
@@ -1764,7 +1783,7 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),browserBalance:null};
+    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),browserBalance:null,zenBrowserBalance:null};
   }catch{return null;}
 }
 function createView(ctx,client,{compact=false}={}) {

@@ -79,6 +79,14 @@ function indicatorWindows(account) {
   }
   return result;
 }
+// Browser readings are workspace/organization scoped, not per-key balances.
+function browserBalanceFor(account,snapshot) {
+  if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
+  const keys=connectedApiKeys(snapshot).filter(a=>a.provider===account.provider);
+  if(keys.length!==1||keys[0].id!==account.id)return null;
+  const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
+  return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
+}
 function indicatorPresentation(account,snapshot) {
   if(!account)return {mode:'unavailable'};
   if(account.kind==='api'){
@@ -88,10 +96,7 @@ function indicatorPresentation(account,snapshot) {
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
     // Billing credit is organization-wide: only attach it if exactly one
     // OpenAI API account exists. Never attribute it to two unrelated keys.
-    const apiCount=connectedApiKeys(snapshot).filter(a=>a.provider==='codex').length;
-    const balance=snapshot?.browserBalance;
-    const amount=account.provider==='codex'&&apiCount===1&&balance?.currency==='USD'&&
-      typeof balance.usd==='number'&&Number.isFinite(balance.usd)?balance.usd:null;
+    const amount=browserBalanceFor(account,snapshot)?.usd??null;
     return {mode:'api',amount,currency:'USD'};
   }
   const windows=indicatorWindows(account);
@@ -104,5 +109,5 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor };
 

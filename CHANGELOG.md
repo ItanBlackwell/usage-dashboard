@@ -2,6 +2,10 @@
 
 ## 0.13.0 (unreleased)
 
+- Preserve confirmed API balances, including zero, during temporary request failures.
+- Extend the optional browser billing companion to OpenCode Zen and explain
+  unavailable or last-known balances without treating missing data as zero.
+
 - Show connected OpenCode pay-as-you-go and OpenCode Go accounts; retrieve Go
   quota windows from the official usage API, without guessing missing balances.
 

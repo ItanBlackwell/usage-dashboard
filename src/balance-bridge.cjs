@@ -20,12 +20,11 @@ const safePort = x => Number.isInteger(x) && x >= 1025 && x <= 65535 ? x : DEFAU
 function validBalance(x) {
   return typeof x === 'number' && Number.isFinite(x) && x >= -1_000_000 && x <= 100_000_000;
 }
-function validPage(url) {
-  try {
-    const u = new URL(url);
-    return u.protocol === 'https:' && u.hostname === 'platform.openai.com' &&
-      u.pathname === '/settings/organization/billing/overview';
-  } catch { return false; }
+function validPage(url,provider='codex') {
+  // Zen reports a fixed source marker, never the private workspace URL.
+  return provider==='codex'
+    ? url==='https://platform.openai.com/settings/organization/billing/overview'
+    : provider==='opencode'&&url==='https://opencode.ai/workspace/billing';
 }
 function secretEquals(actual, expected) {
   if (!actual || !expected) return false;
@@ -70,9 +69,10 @@ async function createBridge({ pairingPath, onBalance, onError = () => {}, now = 
     request.on('end', () => {
       let doc;
       try { doc = JSON.parse(input); } catch { return send(400); }
-      if (!validBalance(doc?.balanceUsd) || doc.currency !== 'USD' || !validPage(doc.page)) return send(422);
+      const provider=doc?.provider??'codex';
+      if (!validBalance(doc?.balanceUsd) || doc.currency !== 'USD' || !validPage(doc.page,provider)) return send(422);
       // ObservedAt is server time. Never trust browser-supplied timestamps.
-      void Promise.resolve(onBalance({ usd:doc.balanceUsd, currency:'USD', observedAt:now(), source:'billing-page' }))
+      void Promise.resolve(onBalance({ provider, usd:doc.balanceUsd, currency:'USD', observedAt:now(), source:'billing-page' }))
         .then(() => send(204)).catch(() => send(500));
     });
   });

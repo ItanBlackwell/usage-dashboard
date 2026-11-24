@@ -55,7 +55,9 @@ See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
 - OpenCode Go uses the [official usage endpoint](https://opencode.ai/docs/console/go/#usage)
   for 5-hour, weekly and monthly limits. Connected OpenCode pay-as-you-go
   accounts are displayed even when their credit balance is unavailable.
+- Confirmed zero balances are displayed with two decimal places and currency.
 - Missing data is shown as unavailable, never assumed to mean a zero balance.
+  Temporary provider errors preserve the last confirmed API balance.
 - The experimental OpenCode GUI SDK may change without backward compatibility.
 
 ## Features
@@ -66,8 +68,8 @@ See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
   requests, preventing stale updates from overriding the latest click.
 - Cached, refreshed usage summaries. Account credentials stay in the host
   process and are never passed to the GUI or saved in the usage cache.
-- Optional [Chrome/Edge OpenAI Billing companion](docs/BROWSER_EXTENSION.md)
-  for reading the visible prepaid balance on an already open Billing page.
+- Optional [Chrome/Edge Billing companion](docs/BROWSER_EXTENSION.md)
+  for reading visible OpenAI and OpenCode Zen prepaid balances on an already open Billing page.
 
 
 ## Community and feedback

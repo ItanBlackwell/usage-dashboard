@@ -1,7 +1,7 @@
-# Optional OpenAI Billing browser companion
+# Optional Billing browser companion
 
 This Chrome/Edge extension is **optional**. It observes the displayed prepaid
-USD balance on the OpenAI Platform Billing overview page and sends the numeric
+USD balance on the OpenAI Platform Billing overview or OpenCode Zen workspace billing page and sends the numeric
 amount to the local Usage Dashboard instance. It does not read or forward
 browser cookies or API keys.
 
@@ -17,13 +17,19 @@ browser cookies or API keys.
 5. Open your own
    `https://platform.openai.com/settings/organization/billing/overview`
    page while signed in. The extension reads only a recognized visible balance.
+   For OpenCode Zen, open the Billing page of your own workspace at
+   `https://opencode.ai/workspace/<workspace-id>/billing`.
+   Reload the installed extension after upgrading and approve its new site permission.
+   Keep only one billing tab per provider open and verify that the browser
+   workspace/organization matches the connected API key. Browser balances are
+   shown only when exactly one API account for that provider is connected.
    Changes are detected while the browser is open and the page is available.
 
 ## Privacy and limitations
 
 - HTTP receiver is bound to `127.0.0.1` only; default port `18746`.
 - Browser→plugin messages use a generated pairing token. Keep it private.
-- If OpenAI redesigns the Billing page, extraction may become unavailable.
+- If either provider redesigns its Billing page, extraction may become unavailable.
 - Do not treat an absent reading as a zero balance.
 - Unloading the extension in Chrome/Edge stops further readings but does not
   automatically delete the local plugin cache.

@@ -9,7 +9,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null});
+const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null});
 const readInterval = (value, fallback=5) => Number.isInteger(value) && value>=1 && value<=120 ? value : fallback;
 function cacheDirectory(env=process.env,home=os.homedir()) {
   return path.join(env.LOCALAPPDATA || path.join(home,'.cache'), 'usage-dashboard');
@@ -49,10 +49,12 @@ function sanitizeSnapshot(value) {
   }));
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
-  const b=value.browserBalance;
-  if(b && b.currency==='USD' && typeof b.usd==='number' && Number.isFinite(b.usd)
-    && typeof b.observedAt==='number' && Number.isFinite(b.observedAt))
-    result.browserBalance={usd:b.usd,currency:'USD',observedAt:b.observedAt,source:'billing-page'};
+  for(const field of ['browserBalance','zenBrowserBalance']){
+    const b=value[field];
+    if(b && b.currency==='USD' && typeof b.usd==='number' && Number.isFinite(b.usd)
+      && typeof b.observedAt==='number' && Number.isFinite(b.observedAt))
+      result[field]={usd:b.usd,currency:'USD',observedAt:b.observedAt,source:'billing-page'};
+  }
   return result;
 }
 function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,clock=Date.now,intervalMinutes=5,onChange=()=>{}}={}) {
@@ -94,6 +96,10 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
             const prev=prevById.get(a.id);
             if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length)
               return {...prev,state:'stale'};
+            if(a.state==='error' && !a.balance && prev?.balance &&
+              prev.provider===a.provider && prev.kind===a.kind &&
+              ['request_failed','rate_limited','invalid_payload','invalid_balance'].includes(a.message))
+              return {...a,balance:prev.balance,balances:prev.balances,checkedAt:prev.checkedAt,state:'stale'};
             return a;
           });
         const accounts=incoming.map(a=>activeOverrides.has(a.provider)
@@ -102,7 +108,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance});
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance,zenBrowserBalance:previous.zenBrowserBalance});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -113,7 +119,9 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
   const cached=async()=>{await init();return sanitizeSnapshot(snapshot);};
   const receiveBalance=async balance=>{
     await init();
-    snapshot=sanitizeSnapshot({...snapshot,browserBalance:balance});
+    const field=balance.provider==='opencode'?'zenBrowserBalance':'browserBalance';
+    if(snapshot[field]?.observedAt>balance.observedAt)return sanitizeSnapshot(snapshot);
+    snapshot=sanitizeSnapshot({...snapshot,[field]:balance});
     inform();
     await write();
     return snapshot;

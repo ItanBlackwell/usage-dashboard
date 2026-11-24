@@ -6,8 +6,10 @@
  */
 'use strict';
 (() => {
-  if (location.hostname !== 'platform.openai.com' ||
-      location.pathname !== '/settings/organization/billing/overview') return;
+  const provider=location.origin==='https://platform.openai.com' &&
+    location.pathname==='/settings/organization/billing/overview'?'codex':
+    location.origin==='https://opencode.ai' && /^\/workspace\/[^/]+\/billing\/?$/.test(location.pathname)?'opencode':null;
+  if(!provider)return;
   const isVisible = el => !!el && el.nodeType === 1 && !el.closest('button,input,script,style') &&
     getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden';
   const amount = text => {
@@ -18,8 +20,12 @@
   };
   function readBalance() {
     const els = Array.from(document.querySelectorAll('main *, [role="main"] *'));
+    const labelPattern=provider==='opencode'
+      ? /^(?:credit\s+balance|prepaid\s+balance|available\s+credit|balance)$/i
+      : /^(?:credit\s+balance|prepaid\s+balance|available\s+credit)$/i;
     const labels = els.filter(el => isVisible(el) && el.children.length <= 2 &&
-      /^(?:credit\s+balance|prepaid\s+balance|available\s+credit)$/i.test((el.innerText || '').trim()));
+      labelPattern.test((el.innerText || '').trim()));
+    const values=new Set();
     for (const el of labels) {
       const near = [el.nextElementSibling, el.parentElement?.nextElementSibling,
         el.parentElement, el.parentElement?.parentElement];
@@ -29,10 +35,10 @@
         // A nearby section should be small and contain a SINGLE monetary figure.
         if (text.length > 240) continue;
         const found = amount(text);
-        if (found !== null) return found;
+        if (found !== null) {values.add(found);break;}
       }
     }
-    return null;
+    return values.size===1?[...values][0]:null;
   }
   let lastValue = null, lastSent = 0, queued = null;
   function scan() {
