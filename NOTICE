@@ -10,3 +10,7 @@ project of OpenCode, OpenAI, Anthropic, Google or other integrated providers.
 Third-party names and marks remain the property of their respective owners.
 
 The Mozilla Public License does not grant trademark rights.
+
+The optional Billing Session runtime uses Playwright Core, distributed under the
+Apache License 2.0. Its original license and notices are retained in the npm
+archive and installed dependency. https://github.com/microsoft/playwright

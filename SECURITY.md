@@ -19,6 +19,11 @@ and the potential impact. Redact all secrets and private account data.
 
 - Provider credentials remain in the OpenCode host process; GUI receives only
   sanitized usage metadata.
+- Billing Session uses dedicated per-account browser profiles, never a user's
+  existing browser profile. Manual login and account confirmation are required.
+  Provider pages return only a sanitized amount to the plugin. Browser
+  authentication remains in private local browser storage, and private billing
+  URLs remain in local bindings. Browser sandboxing is retained.
 - The optional billing extension communicates with a loopback-only listener
   using a local pairing token created during installation.
 - No production pairing tokens, billing snapshots or environment secrets are
@@ -28,4 +33,4 @@ and the potential impact. Redact all secrets and private account data.
 ## Contributor hygiene
 
 Never commit `.env`, `pairing.json`, `settings.json`, local cache, access tokens
-or authenticated HTTP responses. Rotate any credential accidentally disclosed.
+isolated billing profiles, local bindings, or authenticated HTTP responses. Rotate any credential accidentally disclosed.

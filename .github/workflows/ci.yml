@@ -5,7 +5,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/api-balance-availability]
   pull_request:
     branches: [main]
 
@@ -66,8 +66,16 @@ jobs:
                   assert z.testzip() is None
                   names=z.namelist()
                   assert names and not any('/tests/' in '/'+name or name.endswith('Test-UsageDashboard.ps1') for name in names)
-                  assert not any(name.endswith(('pairing.json','settings.json','.env')) for name in names)
+                  assert not any(name.endswith(('pairing.json','settings.json','binding.json','snapshot.json','.env')) for name in names)
+                  assert not any('billing-sessions/' in name or '.usage-dashboard-userdata/' in name for name in names)
+                  if kind == 'Portable':
+                      assert 'Usage-Dashboard/vendor/playwright-core.tgz' in names
           PYCODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Usage-Dashboard-test-build
+          path: release/*.zip
+          if-no-files-found: error
 
   windows-installer-smoke:
     runs-on: windows-latest
@@ -113,6 +121,10 @@ jobs:
           foreach ($name in @('manifest.json','background.js','content.js','pairing.json')) {
             if (-not (Test-Path -LiteralPath (Join-Path $target "browser-extension/$name") -PathType Leaf)) { throw "Missing installed companion file: $name" }
           }
+          $runtime = Join-Path $target 'node_modules/playwright-core/package.json'
+          if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) { throw 'Billing runtime missing' }
+          $pin = (Get-Content package-lock.json -Raw | ConvertFrom-Json).packages.'node_modules/playwright-core'
+          if ((Get-Content -LiteralPath $runtime -Raw | ConvertFrom-Json).version -cne $pin.version) { throw 'Wrong Billing runtime' }
           $pairing = Join-Path $target 'browser-extension/pairing.json'
           $before = [IO.File]::ReadAllText($pairing)
           & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path

@@ -41,35 +41,22 @@ an installed plugin but no indicator appears, check the layout and restart.
 
 See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
 
-### Enable OpenAI and OpenCode Zen API balances (optional browser companion)
+### Enable OpenAI and OpenCode Zen API balances (without an extension)
 
-`Install.cmd` prepares the Billing companion, creates or preserves its
-local pairing token, copies the installed folder path to the clipboard when
-possible, and opens the extensions page in **Microsoft Edge** (preferred),
-or **Google Chrome** if Edge is not installed. The main plugin works without
-this companion; these two API balances normally remain unknown without it.
+The installer prepares the optional Billing Session runtime. Edge is preferred;
+Chrome is used if Edge is not installed. No Developer mode or browser extension
+is necessary. **Manual authorization is still required:**
 
-**You must still complete these steps manually:**
+1. Restart OpenCode and click **Connect Billing** on the OpenAI API or Zen API card.
+2. In the separate browser window, sign in and select the matching organization
+   or workspace. Open its Billing page.
+3. Return to the popup and click **Confirm account** after verifying that the
+   billing account owns the connected API key.
 
-1. In the selected browser profile, enable **Developer mode** on
-   `edge://extensions` or `chrome://extensions`.
-2. Click **Load unpacked**, paste or select the installed folder shown by
-   the installer (normally
-   `%USERPROFILE%\.config\opencode\plugins\usage-dashboard\browser-extension`).
-   If the same extension is already installed from this folder, click **Reload**
-   instead. Make sure **Usage Dashboard · Billing** is enabled and approve any
-   required site permissions.
-3. Return to the installer and type `O` to open the provider pages (optional).
-   Sign in manually to the matching [OpenAI organization](https://platform.openai.com/settings/organization/billing/overview)
-   and/or [OpenCode Console](https://opencode.ai/console) workspace. In OpenCode
-   Console, choose **Settings → Billing**. Keep one billing tab open per provider.
-4. Restart OpenCode Desktop and refresh the billing tabs if they were open
-   before loading the extension. Pin the extension to see its status badge.
-
-The installer does not bypass browser security or change policies or profiles.
-Use `Install.cmd -SkipBrowserSetup` to install/update without opening the
-browser or changing the clipboard. See [Billing companion setup and troubleshooting](docs/BROWSER_EXTENSION.md)
-for limitations, badge meanings, and manual removal.
+The plugin then attempts periodic background reads using that isolated session.
+If login expires, reconnect manually. The experimental page reader may fail if
+the provider changes its site. See [Billing Session setup](docs/BILLING_SESSION.md).
+The [legacy browser companion](docs/BROWSER_EXTENSION.md) remains optional.
 
 ## Compatibility and limits
 
@@ -84,8 +71,8 @@ for limitations, badge meanings, and manual removal.
   and authorization method.
 - OpenCode Go uses the [official usage endpoint](https://opencode.ai/docs/console/go/#usage)
   for 5-hour, weekly and monthly limits. Connected OpenCode pay-as-you-go
-  accounts are displayed even when their credit balance is unavailable; the optional
-  Billing companion can read a visible workspace credit balance.
+  accounts are displayed even when their credit balance is unavailable; Billing Session
+  can read a visible workspace credit balance.
 - Confirmed zero balances are displayed with two decimal places and currency.
 - Missing data is shown as unavailable, never assumed to mean a zero balance.
   Temporary provider errors preserve the last confirmed API balance.
@@ -99,8 +86,8 @@ for limitations, badge meanings, and manual removal.
   requests, preventing stale updates from overriding the latest click.
 - Cached, refreshed usage summaries. Account credentials stay in the host
   process and are never passed to the GUI or saved in the usage cache.
-- Optional [Chrome/Edge Billing companion](docs/BROWSER_EXTENSION.md)
-  for reading visible OpenAI and OpenCode Zen prepaid balances on an already open Billing page.
+- Optional [Billing Session](docs/BILLING_SESSION.md) with separate per-account
+  browser profiles for OpenAI and OpenCode Zen.
 
 
 ## Community and feedback
@@ -112,7 +99,8 @@ for limitations, badge meanings, and manual removal.
 
 ## Development and contributions
 
-Requirements for building from source: Node.js 22+ and Python 3.
+Requirements for building from source: Node.js 22+, Python 3 and network access
+for the integrity-checked Billing runtime archive.
 
 ```sh
 node build.cjs
@@ -133,7 +121,8 @@ Usage Dashboard communicates with connected provider endpoints to obtain
 available usage data; it is not an official product of OpenCode or the AI
 providers it integrates with. The optional browser companion communicates with
 a local loopback-only receiver (default port 18746) using a generated secret.
-Do not share local `pairing.json`, tokens or cached private information.
+Do not share local `pairing.json`, tokens, isolated billing profiles or cached
+private information.
 
 Copyright (c) 2026 ItanBlackwell. Licensed under MPL-2.0.
 See [LICENSE](LICENSE) and [NOTICE](NOTICE).

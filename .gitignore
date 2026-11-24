@@ -1,4 +1,10 @@
 node_modules/
+billing-sessions/
+.usage-dashboard-userdata/
+.billing-runtime-*/
+vendor/
+**/binding.json
+**/snapshot.json
 *.log
 *.bak
 *.tmp

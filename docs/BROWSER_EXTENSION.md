@@ -1,4 +1,6 @@
-# Optional Billing browser companion
+# Legacy optional Billing browser companion
+
+[Billing Session](BILLING_SESSION.md) is now the preferred extension-free method.
 
 This Chrome/Edge extension is **optional**. It observes the displayed prepaid
 USD balance on the OpenAI Platform Billing overview or OpenCode Zen workspace billing page and sends the numeric
@@ -7,15 +9,14 @@ browser cookies or API keys.
 
 ## Automatic preparation
 
-Run `Install.cmd` after closing OpenCode Desktop. The installer copies the
+Run `Install.cmd -SetupBillingCompanion` after closing OpenCode Desktop. The installer copies the
 extension to the installed plugin directory, creates a local pairing token
 if needed (preserves it on upgrades), detects Microsoft Edge first and falls
 back to Google Chrome only when Edge is absent. It copies the extension
 folder path to the clipboard when available and opens the chosen browser's
 extensions page. It cannot silently install or enable an unpacked extension.
 
-To skip opening the browser and modifying the clipboard, use
-`Install.cmd -SkipBrowserSetup`. If no supported browser is found, or the
+The default `Install.cmd` does not open the browser or modify the clipboard. If no supported browser is found, or the
 browser cannot be opened, the main plugin remains installed.
 
 ## Required manual steps

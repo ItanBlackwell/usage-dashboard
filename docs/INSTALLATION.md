@@ -18,38 +18,27 @@ The installer puts files into
 or an absolute `OPENCODE_CONFIG_DIR` if you configured one. Do not add a second
 plugin entry to `opencode.jsonc`: OpenCode automatically discovers the folder.
 
-## Optional Billing companion setup
+## Billing Session setup
 
-The normal `Install.cmd` entry point prepares the extension and its local
-pairing, chooses Edge first (Chrome only if Edge is not installed), copies
-the actual installed extension path to the clipboard when available, and
-opens the browser's extensions page. Browser setup is optional and a failure
-does not undo the plugin installation.
+The default installer prepares the optional Playwright Core runtime but does
+not open a browser or install an extension. Use the **Connect Billing** button
+on the desired OpenAI or Zen API card after restarting OpenCode. Sign in
+manually in the separate Edge (or Chrome) window, select the correct billing
+organization/workspace, and click **Confirm account** in Usage Dashboard.
+See [Billing Session](BILLING_SESSION.md) for the complete instructions.
 
-**Manual steps in the selected browser profile:**
-
-1. Enable Developer mode on `edge://extensions` or `chrome://extensions`.
-2. Select **Load unpacked** and paste/select the installed extension folder.
-   If the extension is already loaded from that folder, use **Reload** instead.
-3. Enable **Usage Dashboard · Billing**, approve any required site permissions,
-   and optionally pin it to the toolbar.
-4. Return to the installer and type `O` to open both provider entry pages,
-   or press Enter to skip. Sign in yourself to the matching organization
-   or workspace. In OpenCode Console select Settings → Billing.
-5. Keep one billing tab per provider, reload tabs that were already open,
-   and restart OpenCode Desktop. Check the extension badge.
-
-To skip the browser setup, run `Install.cmd -SkipBrowserSetup`.
-Direct PowerShell invocation of the installer is non-interactive by default;
-pass `-SetupBillingCompanion` only when the user is present.
-No browser profile, browser policy or default-browser setting is modified.
-
-See [BROWSER_EXTENSION.md](BROWSER_EXTENSION.md) for details.
+The Portable ZIP contains the verified runtime archive. Source ZIP installation
+downloads it from npm and validates the locked SHA-512 hash. If the runtime
+is unavailable, the direct provider integrations still work.
+For legacy extension setup, explicitly run `Install.cmd -SetupBillingCompanion`
+and follow [Browser extension](BROWSER_EXTENSION.md).
 
 ## Uninstallation
 
 Close OpenCode and double-click `Uninstall.cmd` from the extracted distribution.
-The uninstall preserves user settings for an optional later reinstall.
+The uninstall preserves user settings and isolated billing profiles for a later
+reinstall. Disconnect billing sessions first or use the PowerShell uninstaller
+with `-PurgeCachedData` to remove the private profiles and metrics cache.
 If you loaded the Billing companion, remove it manually from the extensions
 page of the browser profile in which you installed it.
 
@@ -74,21 +63,22 @@ providers' supported metrics.
 ## API balances
 
 Balances require specific provider APIs or, for OpenAI and OpenCode Zen prepaid
-balances, the optional browser companion described in [BROWSER_EXTENSION.md](BROWSER_EXTENSION.md).
+balances, an authorized [Billing Session](BILLING_SESSION.md) or the legacy
+browser companion.
 Missing/unavailable metrics do **not** mean a $0 balance.
 
 If all API balances suddenly show dashes, refresh the popup and hover over an
 amount to see the reason. A plugin service warning indicates an IPC failure;
 previously confirmed values for the same account are retained when possible.
 For OpenRouter, a missing balance may also indicate missing key permissions or
-a failed provider request. For OpenAI and Zen, check the browser companion's
-badge as described in [BROWSER_EXTENSION.md](BROWSER_EXTENSION.md).
+a failed provider request. For OpenAI and Zen, check the Billing Session status; if using the legacy
+extension, check its badge.
 
 ## OpenCode and OpenCode Go
 
 Connect the account in OpenCode's provider settings. OpenCode pay-as-you-go
 (also known as Zen) appears as an API account; its credit balance can be read
-from a supported, signed-in Billing page by the companion. Otherwise it is
+from a supported, signed-in Billing page by Billing Session. Otherwise it is
 unknown. OpenCode Go appears as a subscription even
 when authenticated with an API key. It uses the official Go usage endpoint
 for 5-hour, weekly and monthly windows. If the endpoint denies access or

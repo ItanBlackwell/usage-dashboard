@@ -7,15 +7,16 @@ Public-release preparation for Usage Dashboard. This release is **not published*
   OpenRouter, Z.AI/GLM, MiniMax, Gemini and Qwen connections when supported.
 - Compact sidebar rings, live account overview, quota refresh, and latest-wins
   switching between saved accounts.
-- Persistent cache and an optional Chrome/Edge companion for the visible
-  OpenAI Platform Billing balance.
+- Persistent cache and optional per-account Billing Sessions for OpenAI API
+  and OpenCode Zen using Edge or Chrome, without a browser extension.
 
 ## Installation (Windows)
 1. Download `Usage-Dashboard-Portable-0.13.0.zip` from Releases.
 2. Extract the ZIP, completely close OpenCode Desktop and run `Install.cmd`.
 3. Reopen OpenCode and select **Side tabs** or **Inbox** under Interface layout.
 
-See [Installation](docs/INSTALLATION.md) and [Browser extension](docs/BROWSER_EXTENSION.md).
+See [Installation](docs/INSTALLATION.md) and [Billing Session](docs/BILLING_SESSION.md).
+Sign in and confirm the matching account manually before background balance reads.
 
 ## Improvements
 - Public-facing documentation, support guidelines and updated open-source license.

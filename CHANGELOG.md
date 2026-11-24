@@ -2,6 +2,11 @@
 
 ## 0.13.0 (unreleased)
 
+- Add extension-free, account-scoped Billing Session for OpenAI API and OpenCode
+  Zen with manual login, background refresh, reconnection and profile removal.
+- Prepare an integrity-pinned Playwright Core runtime in Portable installation;
+  retain the browser extension as an explicitly optional legacy fallback.
+
 - Preserve confirmed account metrics during temporary plugin IPC fallback and
   incomplete credential inventory responses. Show safe balance error reasons.
 

@@ -34,6 +34,7 @@ jobs:
           & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path
           $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
           if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing' }
+          if (-not (Test-Path (Join-Path $target 'node_modules/playwright-core/package.json'))) { throw 'Billing runtime missing' }
           & ./installer/Uninstall-UsageDashboard.ps1 -PurgeCachedData
           if (Test-Path $target) { throw 'Uninstaller did not remove plugin' }
 
