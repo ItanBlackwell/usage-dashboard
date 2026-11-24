@@ -182,6 +182,71 @@ jobs:
             }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
+      - name: Verify isolated window auto-close policy
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs/promises');
+          const os=require('node:os');
+          const path=require('node:path');
+          const {createBillingSessions,inspectBillingWindow}=require('./src/billing-session.cjs');
+          (async()=>{
+            const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ud-window-'));
+            const a={id:'openai:fixture',provider:'codex',kind:'api',source:'OpenCode',message:'api_key_connected'};
+            const url='https://platform.openai.com/settings/organization/billing/overview';
+            let snapshot={accounts:[a],billingSessions:[],inventoryWarning:null};
+            let now=Date.now(),running=true,exit=null,probes=0,closes=0,reads=0;
+            let observed={state:'not_ready'};
+            const store={cached:async()=>snapshot,refresh:async()=>snapshot,
+              setBillingSession:async(id,p,s)=>{snapshot={...snapshot,billingSessions:s?[s]:[]};return snapshot;}};
+            const page={url:()=>url,route:async()=>{},goto:async()=>{},evaluate:async()=>0};
+            const service=createBillingSessions({directory:dir,store,clock:()=>now,retryWait:async()=>{},
+              defaultBrowser:async()=> 'msedge',browserFinder:async()=>({channel:'msedge',executablePath:'edge.exe'}),
+              loginLauncher:async()=>({pid:12345,isRunning:()=>running,onExit:fn=>{exit=fn;}}),
+              pageDiscovery:async()=>({state:'page_detected',url}),
+              windowInspector:async input=>{
+                probes++;assert.equal(input.pid,12345);assert.ok(input.profilePath.startsWith(dir));
+                if(input.expected){
+                  assert.equal(input.expected.url,url);assert.equal(input.expected.window,99);
+                  // The helper revalidates the current evidence at close time.
+                  if(observed.state==='ready'&&observed.url===input.expected.url&&observed.window===input.expected.window){
+                    closes++;running=false;exit();
+                    return {state:'close_requested',url,window:99};
+                  }
+                }
+                return observed;
+              },
+              chromiumLoader:()=>({launchPersistentContext:async()=>{
+                assert.equal(running,false);reads++;return {pages:()=>[page],once:()=>{},close:async()=>{}};
+              }})});
+            try{
+              await service.action(a.id,'open');
+              await service.tick();assert.equal(closes,0);assert.equal(reads,0);
+              observed={state:'ready',url:'https://accounts.google.com/signin',window:99};
+              now+=4000;await service.tick();assert.equal(closes,0);
+              observed={state:'ready',url,window:99};
+              now+=4000;await service.tick();
+              now+=4000;await service.tick();assert.equal(closes,0);
+              // A changed/uncertain page resets the stability period.
+              observed={state:'not_ready'};
+              now+=1000;await service.tick();assert.equal(closes,0);
+              now+=4000;await service.tick();
+              observed={state:'ready',url,window:99};
+              now+=4000;await service.tick();
+              now+=4000;await service.tick();assert.equal(closes,0);
+              now+=4000;await service.tick();
+              for(let i=0;i<100&&snapshot.billingSessions[0]?.state!=='ok';i++)
+                await new Promise(resolve=>setTimeout(resolve,20));
+              assert.equal(closes,1);assert.equal(reads,1);
+              assert.equal(snapshot.billingSessions[0].state,'ok');
+              assert.equal(snapshot.billingSessions[0].amount,0);
+              assert.ok(probes>=5);
+              const invalid=await inspectBillingWindow({platform:'linux',execFile:()=>{throw Error('must not execute');}});
+              assert.equal(invalid.state,'unavailable');
+            }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
       - name: Verify automatic Billing page discovery
         shell: bash
         run: |
@@ -364,6 +429,7 @@ jobs:
                   if kind == 'Portable':
                       assert 'Usage-Dashboard/vendor/playwright-core.tgz' in names
                       assert 'Usage-Dashboard/billing-runtime.json' in names
+                      assert 'Usage-Dashboard/installer/BillingWindow.ps1' in names
           PYCODE
       - uses: actions/upload-artifact@v4
         with:
@@ -415,6 +481,32 @@ jobs:
           if (-not $?) { throw 'Installer failed' }
           $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
           if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing after installation' }
+          $helper = Join-Path $target 'installer/BillingWindow.ps1'
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'Billing window helper missing' }
+          # Validate the actual helper's URL and amount parsers without reading
+          # a live provider page or a user's browser.
+          $tokens = $null; $parseErrors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile($helper,[ref]$tokens,[ref]$parseErrors)
+          if ($parseErrors.Count) { throw 'Invalid Billing window helper' }
+          foreach ($name in @('Get-CanonicalBillingUrl','Get-UsdAmount')) {
+            $fn = $ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+            if (-not $fn) { throw "Missing helper function: $name" }
+            . ([scriptblock]::Create($fn.Extent.Text))
+          }
+          $Provider = 'codex'
+          $url = 'https://platform.openai.com/settings/organization/billing/overview'
+          if ((Get-CanonicalBillingUrl ($url+'?organization=org-test&code=private')) -cne ($url+'?organization=org-test')) { throw 'Billing URL canonicalization failed' }
+          if ($null -ne (Get-CanonicalBillingUrl 'https://accounts.google.com/signin')) { throw 'Login URL accepted' }
+          if ($null -ne (Get-CanonicalBillingUrl 'https://platform.openai.com.example.invalid/settings/organization/billing/overview')) { throw 'Foreign origin accepted' }
+          if ($null -eq (Get-UsdAmount '$0.00') -or (Get-UsdAmount '$0.00') -ne 0) { throw 'Zero balance rejected' }
+          if ($null -ne (Get-UsdAmount 'Balance unknown')) { throw 'Unknown amount accepted' }
+          # Negative test: a real unrelated process without the dedicated profile
+          # argument must never be accepted, even with its real PID and path.
+          $self = Get-Process -Id $PID
+          $epoch = [DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)
+          $born = [long]($self.StartTime.ToUniversalTime()-$epoch).TotalMilliseconds
+          $result = & powershell.exe -NoProfile -NonInteractive -MTA -ExecutionPolicy Bypass -File $helper -BrowserProcessId $PID -BrowserExecutable $self.Path -ProfileDirectory (Join-Path $env:RUNNER_TEMP 'unrelated-profile') -Provider codex -StartedAt $born
+          if (($result | ConvertFrom-Json).state -ne 'unavailable') { throw 'Unrelated process was accepted by Billing window helper' }
           if (Test-Path -LiteralPath (Join-Path $target 'browser-extension')) { throw 'Retired companion installed' }
           $runtime = Join-Path $target 'node_modules/playwright-core/package.json'
           if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) { throw 'Billing runtime missing' }

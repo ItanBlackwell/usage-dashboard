@@ -57,9 +57,11 @@ No Developer mode or browser extension is necessary.
 2. In the separate normal browser window, sign in yourself (including Google
    sign-in if offered by the provider). Select the matching organization or
    workspace and open its Billing page.
-3. Verify that the billing account owns the connected API key, then close all
-   windows of that separate login profile. The plugin discovers the Billing
-   page, reads its balance and completes the connection automatically.
+3. Verify that the selected billing organization or workspace owns the API key.
+   On Windows, the dedicated browser window closes automatically when its
+   visible Billing page and balance can be recognized reliably. If automatic
+   closure is unavailable, close the dedicated window yourself.
+   The plugin then reads the balance and completes the connection automatically.
    No URL input or confirmation in the popup is required.
 
 Only after manual sign-in is complete does the plugin attempt automated,

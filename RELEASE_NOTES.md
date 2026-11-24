@@ -20,9 +20,11 @@ Public-release preparation for Usage Dashboard. This release is **not published*
 3. Reopen OpenCode and select **Side tabs** or **Inbox** under Interface layout.
 
 See [Installation](docs/INSTALLATION.md) and [Billing Session](docs/BILLING_SESSION.md).
-Sign in in the ordinary dedicated browser, open the matching Billing page,
-and close the login window. Page detection, the first headless balance read,
-and connection completion happen automatically without further popup actions.
+Sign in in the ordinary dedicated browser and open the matching Billing page.
+On Windows, the plugin attempts to close the dedicated window automatically
+after recognizing a stable Billing page and balance. If unavailable, close
+that window manually. Page detection, the first headless balance read, and
+connection completion then happen automatically without further popup actions.
 
 ## Improvements
 - Public-facing documentation, support guidelines and updated open-source license.

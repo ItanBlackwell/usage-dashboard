@@ -36,7 +36,7 @@ if integrity != pin['integrity']:
 portable_files = (
     'package.json', 'package-lock.json', 'billing-runtime.json', 'dist/gui-experimental.cjs',
     'installer/Common.ps1', 'installer/Install-UsageDashboard.ps1',
-    'installer/Uninstall-UsageDashboard.ps1',
+    'installer/Uninstall-UsageDashboard.ps1', 'installer/BillingWindow.ps1',
     'Install.cmd', 'Uninstall.cmd', 'README.md', 'LICENSE', 'NOTICE',
     'docs/INSTALLATION.md', 'docs/BILLING_SESSION.md', 'usage-dashboard-preview.png',
 )

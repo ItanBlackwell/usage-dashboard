@@ -219,7 +219,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
     choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
     choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
-    awaiting_login:tr('Sign in, open the Billing page for this API account, then close the dedicated browser. Connection will finish automatically.','Войди, открой Billing нужного API-аккаунта и закрой отдельное окно. Подключение завершится автоматически.'),
+    awaiting_login:tr('Sign in and open Billing for this API account. The dedicated window closes automatically when the balance is recognized; otherwise close it yourself.','Войди и открой Billing нужного API-аккаунта. После распознавания баланса отдельное окно закроется автоматически; иначе закрой его вручную.'),
     checking_billing:tr('Connecting Billing automatically…','Автоматически подключаем Billing…'),
     awaiting_confirmation:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
     page_detected:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
@@ -281,7 +281,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   }else if(!waiting&&status!=='checking_billing'){
     // No post-login confirmation or address input: main finishes the attempt
     // automatically after the native browser exits.
-    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Visit the matching organization or workspace; closing the window completes the connection automatically.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после закрытия окна подключение завершится автоматически.'));
+    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Select the matching organization or workspace; the window may close automatically after the balance is recognized.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после распознавания баланса окно может закрыться автоматически.'));
   }
   if(status&&!waiting&&status!=='checking_billing')button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
 }

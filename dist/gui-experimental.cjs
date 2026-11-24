@@ -1522,6 +1522,7 @@ function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:chil
     child.once('spawn',()=>{
       child.unref();
       resolve({
+        pid:child.pid,
         isRunning:()=>child.exitCode===null&&child.signalCode===null,
         onExit:fn=>{
           if(child.exitCode!==null||child.signalCode!==null)Promise.resolve().then(fn);
@@ -1529,6 +1530,45 @@ function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:chil
         }
       });
     });
+  });
+}
+// The helper is installed with the plugin. It runs in a separate short-lived
+// Windows PowerShell process so an unresponsive accessibility provider
+// cannot block the host. Timeout/abort affects only the helper.
+function inspectBillingWindow({pluginFolder,browser,profilePath,provider,startedAt,pid,expected=null,signal,env=process.env,
+  platform=process.platform,execFile=require('node:child_process').execFile}={}){
+  const unavailable={state:'unavailable'};
+  if(platform!=='win32'||!pluginFolder||!PROVIDERS.has(provider)||
+    !Number.isSafeInteger(pid)||pid<=0||pid>2147483647||!Number.isFinite(startedAt)||startedAt<=0||
+    !browserMatchesPath(browser?.channel,browser?.executablePath)||!path.win32.isAbsolute(profilePath||'')||
+    signal?.aborted)return Promise.resolve(unavailable);
+  const systemRoot=env.SystemRoot||env.SYSTEMROOT||env.WINDIR;
+  if(typeof systemRoot!=='string'||!path.win32.isAbsolute(systemRoot)||systemRoot.startsWith('\\\\'))return Promise.resolve(unavailable);
+  const executable=path.win32.join(systemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+  const script=path.join(pluginFolder,'installer','BillingWindow.ps1');
+  const args=['-NoLogo','-NoProfile','-NonInteractive','-MTA','-ExecutionPolicy','Bypass','-File',script,
+    '-BrowserProcessId',String(pid),'-BrowserExecutable',browser.executablePath,'-ProfileDirectory',profilePath,
+    '-Provider',provider,'-StartedAt',String(Math.floor(startedAt))];
+  const expectedUrl=billingPage(provider,expected?.url);
+  if(expectedUrl&&Number.isInteger(expected?.window)&&expected.window!==0)
+    args.push('-ExpectedUrl',expectedUrl,'-ExpectedWindow',String(expected.window));
+  return new Promise(resolve=>{
+    try{
+      execFile(executable,args,{shell:false,windowsHide:true,timeout:12000,maxBuffer:4096,
+        env:browserEnvironment(env),...(signal?{signal}:{})},(error,stdout)=>{
+        if(error){resolve(unavailable);return;}
+        try{
+          const r=JSON.parse(String(stdout).trim());
+          if(!['ready','close_requested'].includes(r?.state)){resolve({state:r?.state==='not_ready'?'not_ready':'unavailable'});return;}
+          const url=billingPage(provider,r.url),window=r.window;
+          if(!url||!Number.isInteger(window)||window===0||window< -2147483648||window>2147483647||
+            (r.state==='close_requested'&&(!expectedUrl||url!==expectedUrl||window!==expected.window))){
+            resolve(unavailable);return;
+          }
+          resolve({state:r.state,url,window});
+        }catch{resolve(unavailable);}
+      });
+    }catch{resolve(unavailable);}
   });
 }
 function loadChromium(pluginFolder) {
@@ -1548,7 +1588,7 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,clock=Date.now,
   io=fs,chromiumLoader=()=>loadChromium(pluginFolder),browserFinder=findBrowser,
   loginLauncher=startLoginBrowser,defaultBrowser=defaultWindowsBrowser,pageDiscovery=discoverBillingPage,
-  retryWait=pause,env=process.env}={}) {
+  retryWait=pause,windowInspector=inspectBillingWindow,env=process.env}={}) {
   const manual=new Map(),busy=new Map(),contexts=new Set();
   let stopped=false,timer=null,loginTimer=null,tickBusy=false;
   const folder=account=>path.join(directory,crypto.createHash('sha256').update(account.provider+':'+account.id).digest('hex'));
@@ -1683,7 +1723,8 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       const url=existing?.url||old?.url||ENTRY[account.provider];
       const startedAt=clock();
       const process=await loginLauncher({browser,profilePath,url,env});
-      const record={account,browser,process,url,profilePath,startedAt,finished:false,completion:null};
+      const record={account,browser,process,url,profilePath,startedAt,finished:false,completion:null,
+        windowProbe:null,windowAbort:null,lastWindowProbe:0,readyWindow:null,closeRequested:false,autoCloseUrl:null};
       manual.set(account.id,record);
       const snapshot=await publish(account,'awaiting_login',{browser:browser.channel});
       // Authorization is always manual and outside Playwright. Once the
@@ -1727,6 +1768,9 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
         if(detected.url||detected.state==='billing_page_ambiguous')break;
       }
       if(!detected?.url)return finish(detected?.state||'billing_page_unavailable');
+      // If we requested the close, the flushed navigation must agree with
+      // the visible document that triggered it.
+      if(record.autoCloseUrl&&record.autoCloseUrl!==detected.url)return finish('billing_page_ambiguous');
       let result;
       for(const delay of [0,1000,3000]){
         if(delay)await retryWait(delay);
@@ -1756,7 +1800,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }finally{if(context)await closeContext(context).catch(()=>{});}
   }
   function scheduleCompletion(account,record){
-    if(!sameAttempt(account,record)||record.finished||record.process.isRunning())return Promise.resolve();
+    if(!sameAttempt(account,record)||record.finished||record.process.isRunning()||record.windowProbe)return Promise.resolve();
     if(record.completion)return record.completion;
     // Use the same per-account queue as reconnect/disconnect and periodic reads.
     // An exit notification, a watchdog check and a refresh can never launch
@@ -1767,9 +1811,44 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     record.completion=task;
     return task;
   }
+  function watchLoginWindow(account,record){
+    if(!sameAttempt(account,record)||record.finished||!record.process.isRunning()||record.closeRequested||
+      !Number.isSafeInteger(record.process.pid)||record.process.pid<=0)return Promise.resolve();
+    if(record.windowProbe)return record.windowProbe;
+    const now=clock();
+    if(record.lastWindowProbe&&now-record.lastWindowProbe<4000)return Promise.resolve();
+    record.lastWindowProbe=now;
+    const controller=new AbortController();
+    record.windowAbort=controller;
+    const task=Promise.resolve().then(async()=>{
+      if(!sameAttempt(account,record)||!record.process.isRunning()||!await current(account.id))return;
+      // A stable visible Billing page must remain selected for at least
+      // eight seconds, giving the user a chance to select their workspace.
+      const candidate=record.readyWindow;
+      const expected=candidate&&now-candidate.since>=8000?candidate:null;
+      const result=await windowInspector({pluginFolder,browser:record.browser,profilePath:record.profilePath,
+        provider:account.provider,startedAt:record.startedAt,pid:record.process.pid,expected,signal:controller.signal,env});
+      if(!sameAttempt(account,record))return;
+      const url=billingPage(account.provider,result?.url),window=result?.window;
+      if(result?.state==='close_requested'&&expected&&url===expected.url&&window===expected.window){
+        record.autoCloseUrl=url;record.closeRequested=true;
+        record.readyWindow=null;
+      }else if(result?.state==='ready'&&url&&Number.isInteger(window)&&window!==0){
+        record.readyWindow=candidate?.url===url&&candidate.window===window?candidate:{url,window,since:clock()};
+      }else record.readyWindow=null;
+    }).catch(()=>{record.readyWindow=null;}).finally(()=>{
+      if(record.windowProbe===task){record.windowProbe=null;record.windowAbort=null;}
+      if(!record.process.isRunning())void scheduleCompletion(account,record);
+    });
+    record.windowProbe=task;
+    return task;
+  }
   function checkLoginWindows(){
     if(stopped)return;
-    for(const record of manual.values())void scheduleCompletion(record.account,record);
+    for(const record of manual.values()){
+      if(record.process.isRunning())void watchLoginWindow(record.account,record);
+      else void scheduleCompletion(record.account,record);
+    }
   }
   async function disconnect(account){
     const record=manual.get(account.id);
@@ -1851,11 +1930,17 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       if(snapshot.inventoryWarning)return;
       const connected=new Set(snapshot.accounts.filter(eligible).map(a=>a.id));
       // Never close or kill a user-controlled login browser.
-      for(const id of manual.keys())if(!connected.has(id))manual.delete(id);
+      for(const [id,record] of manual)if(!connected.has(id)){
+        record.windowAbort?.abort();manual.delete(id);
+      }
       for(const account of snapshot.accounts.filter(eligible)){
         if(stopped)break;
         const record=manual.get(account.id);
-        if(record){await scheduleCompletion(account,record);continue;}
+        if(record){
+          if(record.process.isRunning())await watchLoginWindow(account,record);
+          else await scheduleCompletion(account,record);
+          continue;
+        }
         if(busy.has(account.id))continue;
         if(!await current(account.id))continue;
         await run(account,()=>refreshAccount(account)).catch(()=>{});
@@ -1876,7 +1961,11 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   async function stop(){
     stopped=true;if(timer)clearInterval(timer);timer=null;
     if(loginTimer)clearInterval(loginTimer);loginTimer=null;
+    const probes=[...manual.values()].map(record=>{
+      record.windowAbort?.abort();return record.windowProbe;
+    }).filter(Boolean);
     manual.clear();
+    await Promise.allSettled(probes);
     await Promise.allSettled([...contexts].map(c=>closeContext(c)));
     await Promise.allSettled([...busy.values()]);
   }
@@ -1923,7 +2012,7 @@ function createBillingCommands(service,{log=()=>{}}={}) {
   function stop(){stopped=true;results.clear();}
   return {submit,status,stop};
 }
-module.exports={billingPage,historyBillingPages,sessionBillingPages,discoverBillingPage,eligible,readBillingAmount,browserEnvironment,BROWSERS,browserFromProgId,browserExecutable,browserVariant,defaultWindowsBrowser,findBrowser,selectBillingBrowser,playwrightBrowserChannel,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};
+module.exports={billingPage,historyBillingPages,sessionBillingPages,discoverBillingPage,eligible,readBillingAmount,browserEnvironment,BROWSERS,browserFromProgId,browserExecutable,browserVariant,defaultWindowsBrowser,findBrowser,selectBillingBrowser,playwrightBrowserChannel,startLoginBrowser,inspectBillingWindow,createBillingSessions,createBillingCommands,STATES};
 
 })(__billing,__billing.exports);
 const __presentation={exports:{}}; (function(module,exports){
@@ -2452,7 +2541,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
     choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
     choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
-    awaiting_login:tr('Sign in, open the Billing page for this API account, then close the dedicated browser. Connection will finish automatically.','Войди, открой Billing нужного API-аккаунта и закрой отдельное окно. Подключение завершится автоматически.'),
+    awaiting_login:tr('Sign in and open Billing for this API account. The dedicated window closes automatically when the balance is recognized; otherwise close it yourself.','Войди и открой Billing нужного API-аккаунта. После распознавания баланса отдельное окно закроется автоматически; иначе закрой его вручную.'),
     checking_billing:tr('Connecting Billing automatically…','Автоматически подключаем Billing…'),
     awaiting_confirmation:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
     page_detected:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
@@ -2514,7 +2603,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   }else if(!waiting&&status!=='checking_billing'){
     // No post-login confirmation or address input: main finishes the attempt
     // automatically after the native browser exits.
-    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Visit the matching organization or workspace; closing the window completes the connection automatically.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после закрытия окна подключение завершится автоматически.'));
+    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Select the matching organization or workspace; the window may close automatically after the balance is recognized.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после распознавания баланса окно может закрыться автоматически.'));
   }
   if(status&&!waiting&&status!=='checking_billing')button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
 }

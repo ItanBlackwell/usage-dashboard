@@ -21,9 +21,10 @@ and the potential impact. Redact all secrets and private account data.
   sanitized usage metadata.
 - Billing Session uses dedicated per-account browser profiles, never a user's
   existing browser profile. Manual login takes place in an ordinary browser
-  with no automation connection. The initial Connect Billing action authorizes
-  automatic completion for the selected API account. Only after the user
-  closes the dedicated login browser are headless reads attempted. The user
+  with no Playwright or debugging connection. The initial Connect Billing action
+  authorizes automatic completion for the selected API account, including
+  graceful closure of the dedicated login window once Billing is recognized.
+  Only after the dedicated browser exits are headless reads attempted. The user
   must select the matching organization or workspace in the browser. Billing page
   discovery uses read-only navigation records of the dedicated profile and
   restricts the results to allowlisted provider Billing URLs from the current
@@ -34,6 +35,14 @@ and the potential impact. Redact all secrets and private account data.
   local binding, not the renderer or metrics cache.
   No automated sign-in, credential extraction or verification bypass is used.
   Provider pages return only a sanitized amount; browser sandboxing is retained.
+- The Windows window helper verifies the spawned PID, executable, start time
+  and exact dedicated profile argument before inspecting its accessibility
+  tree. It requires a single window and tab, a recognized loaded Billing URL
+  and explicit balance, and rechecks the window and ownership before invoking
+  WindowPattern.Close. No keyboard/mouse injection, forced browser termination,
+  global browser inspection or sign-in interaction is performed. If evidence
+  is insufficient, the window stays open. The helper is invoked without a
+  shell, with a restricted environment and bounded execution time.
 - Browser selection reads the current user's HTTPS association without changing
   it. Only recognized browser identifiers and executable basenames are accepted.
   A local executable may be located through known installation directories or

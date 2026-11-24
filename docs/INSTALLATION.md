@@ -28,11 +28,13 @@ default browser if it is a recognized installed Chromium browser; otherwise,
 choose a detected compatible browser in the account card. Brave, Opera, Opera GX,
 Vivaldi and other Chromium derivatives are experimental. See the browser catalog
 in [Billing Session](BILLING_SESSION.md). Select the correct
-billing organization/workspace and open its Billing page. Close all windows
-of that login profile. Usage Dashboard discovers the Billing page, reads the
-balance and completes the connection automatically. No URL input or separate
-confirmation is required. Select the organization or workspace that owns the
-connected API key before closing the window.
+billing organization/workspace and open its Billing page. Select the organization
+or workspace that owns the connected API key. Usage Dashboard attempts to
+close the dedicated window automatically once the visible Billing page and
+balance are recognized. If the browser does not expose sufficient accessibility
+information, close its dedicated window manually. The plugin then discovers
+the page, reads the balance and completes the connection automatically.
+No URL input or separate confirmation is required.
 See [Billing Session](BILLING_SESSION.md) for the complete instructions.
 
 The Portable ZIP contains the verified runtime archive. Source ZIP installation

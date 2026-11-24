@@ -2,6 +2,11 @@
 
 ## 0.13.0 (unreleased)
 
+- Automatically close the dedicated Billing login window on Windows when a
+  stable, unambiguous Billing document and balance are visible. Verify process
+  and profile ownership, request a graceful UI Automation close, and retain
+  manual closure when accessibility information is insufficient.
+
 - Complete Billing connection automatically after the dedicated login browser
   exits. Remove manual URL input and confirmation controls, retain manual
   provider authentication, and reject missing or ambiguous navigation records.

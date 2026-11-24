@@ -37,6 +37,10 @@ try {
     & $copySafe (Join-Path $saved 'settings.json') (Join-Path $target 'settings.json')
     Copy-Item -LiteralPath $manifest -Destination (Join-Path $target 'package.json') -Force
     Copy-Item -LiteralPath $bundle -Destination (Join-Path $target 'dist\gui-experimental.cjs') -Force
+    $windowHelper=Join-Path $PackageRoot 'installer\BillingWindow.ps1'
+    if (-not (Test-Path -LiteralPath $windowHelper -PathType Leaf)) { throw 'Missing Billing window helper.' }
+    New-Item -ItemType Directory -Force -Path (Join-Path $target 'installer') | Out-Null
+    Copy-Item -LiteralPath $windowHelper -Destination (Join-Path $target 'installer\BillingWindow.ps1') -Force
     Remove-LegacyBillingCompanion -Directory $target
     Remove-LegacyBillingCompanion -Directory $saved
     if (-not $SkipBillingRuntime) {

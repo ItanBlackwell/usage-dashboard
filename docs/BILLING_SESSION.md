@@ -67,13 +67,17 @@ runtime manifest rather than directly deserializing npm's lockfile.
    [Billing overview](https://platform.openai.com/settings/organization/billing/overview).
    For Zen, select the workspace in [OpenCode Console](https://opencode.ai/console)
    and open its Billing settings.
-4. Verify that the page corresponds to this API key and close **all windows
-   of the dedicated login profile**. Do not close unrelated browser profiles.
-   Usage Dashboard automatically detects the Billing page from the dedicated
-   browser's navigation records for this login attempt, attempts a headless
-   read using the existing session, and completes the connection if the
-   balance is recognized. An explicit zero balance is valid.
-   No URL input, confirmation button or open popup is required.
+4. Verify that the page corresponds to this API key. On Windows, the plugin
+   observes the dedicated browser through UI Automation and attempts a
+   graceful close when it recognizes an explicit balance on the loaded
+   Billing page. The page and window must remain stable for at least eight
+   seconds. If automatic closure is unavailable, close all windows of the
+   dedicated login profile yourself. Do not close unrelated browser profiles.
+   After the browser exits, Usage Dashboard checks navigation records for
+   this login attempt, attempts a headless read using the existing session,
+   and completes the connection if the balance is recognized. An explicit
+   zero balance is valid. No URL input, confirmation button or open popup
+   is required.
 5. Subsequent reads happen in a headless browser on the configured refresh
    interval, while OpenCode Desktop is running. A manual refresh also requests
    a billing update. The browser is closed after each read.
@@ -103,10 +107,18 @@ Desktop version. Main-process diagnostics record only fixed command outcomes.
 - If the session expires, headless access is denied, or the provider requires
   interactive verification, select **Reconnect Billing** and sign in manually.
   If the provider does not permit headless reads, the balance remains unavailable.
-- If the login browser is still open, close its dedicated windows. Connection
-  completes automatically after the browser exits. The plugin never terminates
-  your login browser. It retries briefly if navigation data is still being
-  saved or the browser profile is locked. If a terminal error remains, use
+- Automatic window closure is experimental. It requires a visible, single-tab
+  browser window owned by the exact spawned process and dedicated profile,
+  an unambiguous loaded Billing document, and a recognized USD balance.
+  The helper revalidates the evidence before requesting the standard Windows
+  UI Automation window close. Browser builds that do not expose the necessary
+  accessibility information, multiple windows/tabs, a modal dialog or a
+  minimized window can prevent closure. In these cases close the dedicated
+  windows manually. The plugin never forcibly terminates the login browser.
+- Connection completes automatically after the browser exits. It retries
+  briefly if navigation data is still being saved or the profile is locked.
+  If automatic closure was requested, the discovered Billing page must match
+  the page observed before closure. If a terminal error remains, use
   **Reconnect Billing** to begin a new attempt.
 - Keep OpenCode Desktop running until the initial connection completes. If it
   is restarted during an unfinished login attempt, reconnect to start again.
@@ -145,10 +157,15 @@ local binding. The reader examines only the dedicated profile, after the
 ordinary login browser closes, and retains only recognized Billing URLs from
 the current login attempt. It does not read cookies, saved passwords, page
 titles or OAuth parameters. No navigation records or URLs are returned to
-the renderer. The ordinary login browser has no automation
-connection. Subsequent headless reads use a private automation pipe and
-retain browser sandboxing. No external debugging listener or personal
-browser profile is used.
+the renderer. The ordinary login browser has no Playwright or debugging
+connection. A bundled Windows PowerShell helper observes only the verified
+dedicated browser window through Windows UI Automation. It checks the loaded
+document address before inspecting adjacent accessible Billing balance text;
+it does not interact with sign-in forms, read password fields, inject input,
+or inspect personal browser windows. Only fixed status, a canonical Billing
+URL and an ephemeral window handle are returned to the main process.
+Subsequent headless reads use a private automation pipe and retain browser
+sandboxing. No external debugging listener or personal browser profile is used.
 
 Normal uninstall preserves local user data for reinstall. To remove saved
 billing sessions, disconnect them first or run the uninstaller with
