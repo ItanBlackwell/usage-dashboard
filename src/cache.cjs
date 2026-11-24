@@ -10,7 +10,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null,billingSessions:[]});
-const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','profile_error','disconnect_error']);
+const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
 function sanitizeBillingSessions(value,accounts) {
   if(!Array.isArray(value))return [];
   const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
@@ -18,7 +18,7 @@ function sanitizeBillingSessions(value,accounts) {
   for(const s of value.slice(0,80)){
     if(!s||typeof s.id!=='string'||eligible.get(s.id)!==s.provider||!BILLING_STATES.has(s.state))continue;
     const valid=typeof s.amount==='number'&&Number.isFinite(s.amount)&&s.amount>=(s.provider==='opencode'?0:-1000000)&&s.amount<=100000000;
-    const amount=valid&&['ok','stale','login_required','balance_unavailable','browser_missing','browser_error','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
+    const amount=valid&&['ok','stale','login_required','balance_unavailable','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
     const checkedAt=amount!==null&&Number.isFinite(s.checkedAt)&&s.checkedAt>0?s.checkedAt:0;
     result.set(s.id,{id:s.id,provider:s.provider,state:s.state,amount:checkedAt?amount:null,checkedAt});
   }

@@ -925,7 +925,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null,billingSessions:[]});
-const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','profile_error','disconnect_error']);
+const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
 function sanitizeBillingSessions(value,accounts) {
   if(!Array.isArray(value))return [];
   const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
@@ -933,7 +933,7 @@ function sanitizeBillingSessions(value,accounts) {
   for(const s of value.slice(0,80)){
     if(!s||typeof s.id!=='string'||eligible.get(s.id)!==s.provider||!BILLING_STATES.has(s.state))continue;
     const valid=typeof s.amount==='number'&&Number.isFinite(s.amount)&&s.amount>=(s.provider==='opencode'?0:-1000000)&&s.amount<=100000000;
-    const amount=valid&&['ok','stale','login_required','balance_unavailable','browser_missing','browser_error','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
+    const amount=valid&&['ok','stale','login_required','balance_unavailable','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
     const checkedAt=amount!==null&&Number.isFinite(s.checkedAt)&&s.checkedAt>0?s.checkedAt:0;
     result.set(s.id,{id:s.id,provider:s.provider,state:s.state,amount:checkedAt?amount:null,checkedAt});
   }
@@ -1227,7 +1227,7 @@ const PROVIDERS = new Set(['codex','opencode']);
 const CHANNELS = ['msedge','chrome'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
 const STATES = ['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale',
-  'login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','profile_error','disconnect_error'];
+  'login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
 
 function billingPage(provider,raw) {
   try {
@@ -1370,12 +1370,21 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     try{chromium=chromiumLoader();if(!chromium?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
     try{await io.mkdir(profile(account,browser.channel),{recursive:true,mode:0o700});}
     catch{throw new Error('profile_error');}
-    const context=await chromium.launchPersistentContext(profile(account,browser.channel),{
+    let context;
+    try{context=await chromium.launchPersistentContext(profile(account,browser.channel),{
       channel:browser.channel,executablePath:browser.executablePath,headless,
       viewport:null,acceptDownloads:false,chromiumSandbox:true,timeout:15000,
       handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,
       args:['--disable-background-mode','--disable-sync'],env:browserEnvironment(env)
-    }).catch(()=>{throw new Error('browser_error');});
+    });}catch(e){
+      // Publish only a fixed classification, never raw browser arguments,
+      // local paths, private URLs or exception text.
+      const message=typeof e?.message==='string'?e.message:'';
+      if(/timeout/i.test(message))throw new Error('browser_timeout');
+      if(/profile.*(?:in use|lock)|processsingleton|user data directory is already in use/i.test(message))throw new Error('profile_busy');
+      if(/access is denied|permission denied|eacces|eperm/i.test(message))throw new Error('browser_access_denied');
+      throw new Error('browser_error');
+    }
     contexts.add(context);
     context.once('close',()=>contexts.delete(context));
     if(stopped){await closeContext(context).catch(()=>{});throw new Error('browser_error');}
@@ -1411,6 +1420,8 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     const old=await readBinding(account);
     let browser;
     try{
+      // Diagnose a missing runtime before looking for installed browsers.
+      try{if(!chromiumLoader()?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
       browser=await browserFinder(old?.channel??null,env);
       if(!browser&&old)browser=await browserFinder(null,env);
       if(!browser)throw new Error('browser_missing');
@@ -1496,9 +1507,25 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     busy.set(account.id,task);return task;
   }
   async function action(id,verb){
-    const account=await current(id);
-    if(!account||!['open','confirm','disconnect'].includes(verb)||stopped)return store.cached();
-    return run(account,()=>verb==='open'?open(account):verb==='confirm'?confirm(account):disconnect(account),true);
+    const reply=async(accepted,reason=null)=>({accepted,reason,snapshot:await store.cached()});
+    if(stopped)return reply(false,'service_unavailable');
+    if(!['open','confirm','disconnect'].includes(verb))return reply(false,'invalid_action');
+    let snapshot=await store.cached();
+    // Retry the private host inventory once rather than silently ignoring a click.
+    if(snapshot.inventoryWarning){
+      try{snapshot=await bounded(store.refresh(true),20000);}catch{return reply(false,'inventory_unavailable');}
+      if(snapshot.inventoryWarning)return reply(false,'inventory_unavailable');
+    }
+    const account=snapshot.accounts.find(a=>a.id===id&&eligible(a));
+    if(!account)return reply(false,'account_unavailable');
+    try{
+      let executed=false;
+      await run(account,async()=>{
+        executed=true;
+        return verb==='open'?open(account):verb==='confirm'?confirm(account):disconnect(account);
+      },true);
+      return executed?reply(true):reply(false,'account_unavailable');
+    }catch{return reply(false,'action_failed');}
   }
   async function tick(){
     if(stopped||tickBusy)return;
@@ -1896,7 +1923,8 @@ const BalanceSchema = Schema.Struct({usd:Schema.Number,currency:Schema.String,ob
 const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
   inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,browserBalance:Schema.NullOr(BalanceSchema),zenBrowserBalance:Schema.NullOr(BalanceSchema),billingSessions:Schema.Array(BillingSessionSchema) });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema},billing:{input:Schema.Struct({id:Schema.String,action:Schema.String}),output:SnapshotSchema}}});
+const BillingActionResultSchema = Schema.Struct({accepted:Schema.Boolean,reason:Schema.NullOr(Schema.String),snapshot:SnapshotSchema});
+const Metrics = Ipc.define({id:'usage-dashboard.metrics',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema},billing:{input:Schema.Struct({id:Schema.String,action:Schema.String}),output:BillingActionResultSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -1920,6 +1948,7 @@ const visualIntents = new Map();
 let latestSelectedID=null;
 // Retain the last authoritative main-process snapshot across popup lifetimes.
 let latestVerifiedSnapshot=null;
+const billingUiPending=new Set(),billingUiErrors=new Map();
 function notifySnapshot(snapshot){for(const listener of snapshotListeners){try{listener(snapshot);}catch{}}}
 // All user-facing generic text uses OpenCode's own translations. The host
 // supplies these keys in ALL supported Desktop languages and updates them as
@@ -2057,6 +2086,7 @@ function accountHeader(ctx,card,account,onSwitch,switchingID,api=false,summary=n
   }
 }
 function renderBillingControls(ctx,card,account,session,onBilling,pending){
+  const actionError=billingUiErrors.get(account.id);
   if(!['codex','opencode'].includes(account.provider)||account.kind!=='api')return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
   const tr=(en,rus)=>ru?rus:en;
@@ -2071,20 +2101,33 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     balance_unavailable:tr('Billing balance unavailable','Баланс Billing недоступен'),
     runtime_missing:tr('Billing runtime missing. Reinstall the plugin.','Нет модуля Billing. Переустанови плагин.'),
     browser_missing:tr('Microsoft Edge or Google Chrome required.','Нужен Microsoft Edge или Chrome.'),
-    browser_error:tr('Billing browser unavailable.','Браузер Billing недоступен.'),
+    browser_error:tr('Could not launch Billing browser.','Не удалось запустить браузер Billing.'),
+    browser_timeout:tr('Browser launch timed out.','Истекло время запуска браузера.'),
+    profile_busy:tr('Billing profile is in use. Close its browser and retry.','Профиль Billing занят. Закрой его браузер и повтори.'),
+    browser_access_denied:tr('Browser launch was denied by the system.','Система запретила запуск браузера.'),
     profile_error:tr('Could not save billing profile.','Не удалось сохранить профиль Billing.'),
     disconnect_error:tr('Close the billing browser and retry removal.','Закрой браузер Billing и повтори удаление.')
   }[status];
-  const line=add(card,$('div','display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;margin-top:4px'));
+  const errors={
+    service_unavailable:tr('Billing service unavailable. Restart OpenCode.','Служба Billing недоступна. Перезапусти OpenCode.'),
+    inventory_unavailable:tr('Account inventory unavailable. Refresh and retry.','Список учётных данных недоступен. Обнови и повтори.'),
+    account_unavailable:tr('Account not available to Billing. Refresh and retry.','Аккаунт недоступен службе Billing. Обнови и повтори.'),
+    invalid_action:tr('Unsupported Billing action.','Действие Billing не поддерживается.'),
+    action_failed:tr('Billing action failed. Retry.','Действие Billing завершилось ошибкой. Повтори.'),
+    ipc_unavailable:tr('Billing IPC unavailable. Restart or reinstall the plugin.','Нет связи со службой Billing. Перезапусти или переустанови плагин.'),
+    ipc_timeout:tr('Billing service did not respond.','Служба Billing не отвечает.')
+  };
+  const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
   line.setAttribute('data-pv-billing-session',status||'disconnected');
   const waiting=['awaiting_confirmation','confirmation_unavailable'].includes(status);
   const busy=pending||status==='connecting';
-  if(text)add(line,$('span','font-size:10px;line-height:1.3;min-width:0;flex:1;color:'+palette.muted,text));
+  const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
+  if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback));
   const button=(verb,label,tooltip)=>{
-    const el=add(line,$('button','border:1px solid '+palette.border+';border-radius:5px;background:transparent;color:'+palette.text+';font-size:10px;padding:3px 5px;cursor:pointer;white-space:nowrap',label));
-    el.type='button';el.title=tooltip;el.disabled=!onBilling||busy||account.message==='plugin_ipc_unavailable';
+    const el=add(line,$('button','box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:auto;height:18px;min-height:18px;max-height:18px;line-height:12px;border:1px solid '+palette.border+';border-radius:4px;background:transparent;color:'+palette.text+';font-family:inherit;font-size:10px;font-weight:400;padding:0 5px;margin:0;cursor:pointer;white-space:nowrap;appearance:none',label));
+    el.type='button';el.title=tooltip;el.disabled=!onBilling||busy;
     el.setAttribute('data-pv-billing-action',verb);
-    el.addEventListener('click',()=>onBilling?.(account.id,verb));
+    el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb);});
   };
   if(waiting){
     button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only if the visible Billing organization or workspace matches this API key.','Подтверди только если организация или workspace на Billing соответствует этому API-ключу.'));
@@ -2256,7 +2299,7 @@ function createView(ctx,client,{compact=false}={}) {
   const body=add(root,$('div'));
   let alive=true,running=false,hasData=false,lastSnapshot=null,lastServerSnapshot=null,queuedRefresh=false,coldRefreshRequested=false,switchSequence=0,commitVersion=0;
   const stableOrder=stableAccountOrder;
-  const desiredByProvider=new Map(),billingPending=new Set();
+  const desiredByProvider=new Map(),billingPending=billingUiPending;
   const applyDesired=snapshot=>{
     if(!snapshot)return snapshot;
     // A popup may close while activation is still running. The global pending
@@ -2329,22 +2372,31 @@ function createView(ctx,client,{compact=false}={}) {
     }
   }
   async function billingAction(id,action){
-    if(!alive||typeof client.billing!=='function'||billingPending.has(id)||!lastSnapshot)return;
-    const account=lastSnapshot.accounts?.find(a=>a.id===id&&a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='plugin_ipc_unavailable');
+    if(!alive||billingPending.has(id)||!lastSnapshot)return;
+    const account=lastSnapshot.accounts?.find(a=>a.id===id&&a.kind==='api'&&['codex','opencode'].includes(a.provider));
     if(!account)return;
+    billingUiErrors.delete(id);
+    if(typeof client.billing!=='function'){
+      billingUiErrors.set(id,'ipc_unavailable');
+      renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+      return;
+    }
     billingPending.add(id);
     const version=commitVersion;
     renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
-    let failed=false;
     try{
       const result=await bounded(signal=>client.billing({id,action},{signal}),90000);
-      if(alive&&version===commitVersion){commitVersion++;showSnapshot(result);notifySnapshot(result);}
-    }catch{failed=true;}
+      if(!result||typeof result.accepted!=='boolean'||!result.snapshot){
+        billingUiErrors.set(id,'ipc_unavailable');
+      }else{
+        if(!result.accepted)billingUiErrors.set(id,result.reason||'action_failed');
+        if(alive&&version===commitVersion){commitVersion++;showSnapshot(result.snapshot);notifySnapshot(result.snapshot);}
+      }
+    }catch(e){billingUiErrors.set(id,e?.message==='timeout'?'ipc_timeout':'ipc_unavailable');}
     finally{
       billingPending.delete(id);
       if(alive){
         renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
-        if(failed)add(body,note(msg('Billing action failed. Check the plugin service and retry.','Не удалось выполнить действие Billing. Проверь службу плагина и повтори.')));
         void load(false);
       }
     }

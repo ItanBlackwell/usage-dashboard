@@ -41,6 +41,12 @@ user-confirmed, not independently verified by the provider API.
 
 ## Troubleshooting and disconnect
 
+Clicking Connect Billing displays an immediate progress indicator. If the host
+cannot provide a usable account inventory, the plugin retries it once and
+reports the failure. Browser/runtime/IPC errors are shown on the account card
+and retained while the Desktop window remains open. They contain no private
+paths, URLs or authentication data.
+
 - If login expires or the provider requires interactive verification, select
   **Reconnect Billing** and sign in manually again. No verification bypass
   is attempted.

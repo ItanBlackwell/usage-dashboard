@@ -2,6 +2,10 @@
 
 ## 0.13.0 (unreleased)
 
+- Report Billing action failures explicitly, retry incomplete account inventory,
+  retain safe UI diagnostics across popup lifetimes and constrain Billing
+  buttons to compact 18-pixel controls.
+
 - Fix Billing runtime installation on Windows PowerShell 5.1 by using a flat
   runtime pin validated against the npm lockfile during packaging.
 

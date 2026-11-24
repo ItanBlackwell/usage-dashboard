@@ -51,6 +51,37 @@ jobs:
           assert.equal(p.browserBalanceFor(b,p.mergeInventoryFallback({accounts:[b]},previous)).usd,0);
           assert.equal(p.mergeInventoryFallback({accounts:[b,{...b,id:'openai:b'}]},previous).browserBalance,null);
           NODE
+      - name: Verify Billing action responses
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs/promises');
+          const os=require('node:os');
+          const path=require('node:path');
+          const {createBillingSessions}=require('./src/billing-session.cjs');
+          (async()=>{
+            const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ud-billing-'));
+            const a={id:'openai:test',provider:'codex',kind:'api',source:'OpenCode',message:'api_key_connected'};
+            let snapshot={accounts:[a],billingSessions:[],inventoryWarning:'credentials_unavailable'};
+            let refreshCount=0;
+            const store={cached:async()=>snapshot,refresh:async()=>{refreshCount++;return snapshot;},
+              setBillingSession:async(id,provider,s)=>{snapshot={...snapshot,billingSessions:s?[s]:[]};return snapshot;}};
+            const service=createBillingSessions({directory:dir,store,chromiumLoader:()=>{throw Error('private path');}});
+            try{
+              const blocked=await service.action(a.id,'open');
+              assert.equal(blocked.accepted,false);
+              assert.equal(blocked.reason,'inventory_unavailable');
+              assert.equal(refreshCount,1);
+              snapshot={...snapshot,inventoryWarning:null};
+              const missing=await service.action(a.id,'open');
+              assert.equal(missing.accepted,true);
+              assert.equal(missing.snapshot.billingSessions[0].state,'runtime_missing');
+              assert.equal((await service.action('unknown','open')).reason,'account_unavailable');
+              assert.equal((await service.action(a.id,'invalid')).reason,'invalid_action');
+            }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
       - name: Package and verify archives without test scripts or secrets
         shell: bash
         run: |
@@ -129,6 +160,32 @@ jobs:
           $env:USAGE_DASHBOARD_SMOKE_PLUGIN = $target
           node -e "const path=require('node:path');const p=require(path.join(process.env.USAGE_DASHBOARD_SMOKE_PLUGIN,'node_modules','playwright-core'));if(typeof p.chromium?.launchPersistentContext!=='function')process.exit(1)"
           if ($LASTEXITCODE -ne 0) { throw 'Billing runtime cannot be loaded' }
+          $env:USAGE_DASHBOARD_SMOKE_PROFILE = Join-Path $env:RUNNER_TEMP 'usage-dashboard-browser-smoke'
+          @'
+          const path=require('node:path');
+          const fs=require('node:fs/promises');
+          const {chromium}=require(path.join(process.env.USAGE_DASHBOARD_SMOKE_PLUGIN,'node_modules','playwright-core'));
+          const {findBrowser,browserEnvironment,readBillingAmount}=require('./src/billing-session.cjs');
+          (async()=>{
+            const browser=await findBrowser();
+            if(!browser)throw Error('No supported browser on Windows runner');
+            const profile=process.env.USAGE_DASHBOARD_SMOKE_PROFILE;
+            let context;
+            try{
+              context=await chromium.launchPersistentContext(profile,{
+                channel:browser.channel,executablePath:browser.executablePath,headless:true,
+                viewport:null,acceptDownloads:false,chromiumSandbox:true,timeout:15000,
+                handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,
+                args:['--disable-background-mode','--disable-sync'],env:browserEnvironment(process.env)
+              });
+              const page=context.pages()[0]||await context.newPage();
+              await page.setContent('<title>Usage Dashboard smoke</title><p>Credit balance</p><p>$0.00</p>');
+              const value=await page.evaluate(readBillingAmount,'codex');
+              if(value!==0)throw Error('Synthetic zero balance was not recognized');
+            }finally{if(context)await context.close();await fs.rm(profile,{recursive:true,force:true});}
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { throw 'Billing browser launch smoke failed' }
           $pairing = Join-Path $target 'browser-extension/pairing.json'
           $before = [IO.File]::ReadAllText($pairing)
           & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path

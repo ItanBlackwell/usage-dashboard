@@ -15,7 +15,7 @@ const PROVIDERS = new Set(['codex','opencode']);
 const CHANNELS = ['msedge','chrome'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
 const STATES = ['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale',
-  'login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','profile_error','disconnect_error'];
+  'login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
 
 function billingPage(provider,raw) {
   try {
@@ -158,12 +158,21 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     try{chromium=chromiumLoader();if(!chromium?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
     try{await io.mkdir(profile(account,browser.channel),{recursive:true,mode:0o700});}
     catch{throw new Error('profile_error');}
-    const context=await chromium.launchPersistentContext(profile(account,browser.channel),{
+    let context;
+    try{context=await chromium.launchPersistentContext(profile(account,browser.channel),{
       channel:browser.channel,executablePath:browser.executablePath,headless,
       viewport:null,acceptDownloads:false,chromiumSandbox:true,timeout:15000,
       handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,
       args:['--disable-background-mode','--disable-sync'],env:browserEnvironment(env)
-    }).catch(()=>{throw new Error('browser_error');});
+    });}catch(e){
+      // Publish only a fixed classification, never raw browser arguments,
+      // local paths, private URLs or exception text.
+      const message=typeof e?.message==='string'?e.message:'';
+      if(/timeout/i.test(message))throw new Error('browser_timeout');
+      if(/profile.*(?:in use|lock)|processsingleton|user data directory is already in use/i.test(message))throw new Error('profile_busy');
+      if(/access is denied|permission denied|eacces|eperm/i.test(message))throw new Error('browser_access_denied');
+      throw new Error('browser_error');
+    }
     contexts.add(context);
     context.once('close',()=>contexts.delete(context));
     if(stopped){await closeContext(context).catch(()=>{});throw new Error('browser_error');}
@@ -199,6 +208,8 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     const old=await readBinding(account);
     let browser;
     try{
+      // Diagnose a missing runtime before looking for installed browsers.
+      try{if(!chromiumLoader()?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
       browser=await browserFinder(old?.channel??null,env);
       if(!browser&&old)browser=await browserFinder(null,env);
       if(!browser)throw new Error('browser_missing');
@@ -284,9 +295,25 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     busy.set(account.id,task);return task;
   }
   async function action(id,verb){
-    const account=await current(id);
-    if(!account||!['open','confirm','disconnect'].includes(verb)||stopped)return store.cached();
-    return run(account,()=>verb==='open'?open(account):verb==='confirm'?confirm(account):disconnect(account),true);
+    const reply=async(accepted,reason=null)=>({accepted,reason,snapshot:await store.cached()});
+    if(stopped)return reply(false,'service_unavailable');
+    if(!['open','confirm','disconnect'].includes(verb))return reply(false,'invalid_action');
+    let snapshot=await store.cached();
+    // Retry the private host inventory once rather than silently ignoring a click.
+    if(snapshot.inventoryWarning){
+      try{snapshot=await bounded(store.refresh(true),20000);}catch{return reply(false,'inventory_unavailable');}
+      if(snapshot.inventoryWarning)return reply(false,'inventory_unavailable');
+    }
+    const account=snapshot.accounts.find(a=>a.id===id&&eligible(a));
+    if(!account)return reply(false,'account_unavailable');
+    try{
+      let executed=false;
+      await run(account,async()=>{
+        executed=true;
+        return verb==='open'?open(account):verb==='confirm'?confirm(account):disconnect(account);
+      },true);
+      return executed?reply(true):reply(false,'account_unavailable');
+    }catch{return reply(false,'action_failed');}
   }
   async function tick(){
     if(stopped||tickBusy)return;
