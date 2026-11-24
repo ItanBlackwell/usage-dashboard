@@ -2,6 +2,9 @@
 
 ## 0.13.0 (unreleased)
 
+- Isolate Billing commands in a versioned IPC contract, acknowledge commands
+  before launching the browser, and report transport-stage error codes.
+
 - Remove the browser companion and local HTTP balance receiver. Use only direct
   provider APIs and account-scoped Billing Sessions. Clean obsolete installed
   files and discard unbound cached balances on upgrade.

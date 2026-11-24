@@ -32,8 +32,14 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
 const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
   inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,billingSessions:Schema.Array(BillingSessionSchema) });
-const BillingActionResultSchema = Schema.Struct({accepted:Schema.Boolean,reason:Schema.NullOr(Schema.String),snapshot:SnapshotSchema});
-const Metrics = Ipc.define({id:'usage-dashboard.metrics',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema},billing:{input:Schema.Struct({id:Schema.String,action:Schema.String}),output:BillingActionResultSchema}}});
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v2',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+// Version independently from the metrics contract. Older host clients may
+// retain method tables for an existing token across plugin reloads.
+const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v2',methods:{
+  ping:{output:Schema.String},
+  submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String}),output:Schema.String},
+  status:{input:Schema.Struct({id:Schema.String,ticket:Schema.String}),output:Schema.String}
+}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -58,6 +64,14 @@ let latestSelectedID=null;
 // Retain the last authoritative main-process snapshot across popup lifetimes.
 let latestVerifiedSnapshot=null;
 const billingUiPending=new Set(),billingUiErrors=new Map();
+let billingTicketSequence=0;
+const billingUiListeners=new Set();
+function updateBillingUi(){for(const fn of billingUiListeners){try{fn();}catch{}}}
+function billingError(e,stage){
+  if(e?.message==='timeout')return 'ipc_timeout';
+  // Fixed stage identifiers only. Never surface raw IPC errors or credentials.
+  return stage==='ping'?'ipc_ping_failed':stage==='submit'?'ipc_submit_failed':'ipc_status_failed';
+}
 function notifySnapshot(snapshot){for(const listener of snapshotListeners){try{listener(snapshot);}catch{}}}
 // All user-facing generic text uses OpenCode's own translations. The host
 // supplies these keys in ALL supported Desktop languages and updates them as
@@ -223,7 +237,13 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     account_unavailable:tr('Account not available to Billing. Refresh and retry.','Аккаунт недоступен службе Billing. Обнови и повтори.'),
     invalid_action:tr('Unsupported Billing action.','Действие Billing не поддерживается.'),
     action_failed:tr('Billing action failed. Retry.','Действие Billing завершилось ошибкой. Повтори.'),
-    ipc_unavailable:tr('Billing IPC unavailable. Restart or reinstall the plugin.','Нет связи со службой Billing. Перезапусти или переустанови плагин.'),
+    ipc_unavailable:tr('Billing IPC client missing [B01].','Клиент IPC Billing отсутствует [B01].'),
+    ipc_ping_failed:tr('Billing service did not accept the connection [B02].','Служба Billing не отвечает на проверку связи [B02].'),
+    ipc_submit_failed:tr('Billing command was not accepted [B03].','Команда Billing не принята [B03].'),
+    ipc_status_failed:tr('Billing command status unavailable [B04].','Статус команды Billing недоступен [B04].'),
+    ipc_protocol:tr('Billing service protocol mismatch [B05].','Несовместимый протокол Billing [B05].'),
+    busy:tr('Another Billing action is in progress.','Другое действие Billing ещё выполняется.'),
+    unknown:tr('Billing command was interrupted. Retry.','Команда Billing прервана. Повтори.'),
     ipc_timeout:tr('Billing service did not respond.','Служба Billing не отвечает.')
   };
   const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
@@ -396,7 +416,7 @@ async function publicIntegrationFallback(ctx) {
     return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),billingSessions:[]};
   }catch{return null;}
 }
-function createView(ctx,client,{compact=false}={}) {
+function createView(ctx,client,{compact=false,billingClient=null}={}) {
   const root=$('section',`box-sizing:border-box;min-width:0;${compact?'overflow:visible;':'overflow-y:auto;max-height:100%;'}padding:${compact?'8px 9px':'16px'};color:${palette.text};font-family:inherit;background:${compact?'var(--v2-background-bg-layer-02, var(--background,#18191d))':'transparent'}`);
   const header=add(root,$('div','display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid ${palette.border}'));
   const heading=add(header,$('strong',`font-size:12px;color:${palette.text}`,t(ctx,'usage.title')));
@@ -483,29 +503,37 @@ function createView(ctx,client,{compact=false}={}) {
     const account=lastSnapshot.accounts?.find(a=>a.id===id&&a.kind==='api'&&['codex','opencode'].includes(a.provider));
     if(!account)return;
     billingUiErrors.delete(id);
-    if(typeof client.billing!=='function'){
-      billingUiErrors.set(id,'ipc_unavailable');
-      renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
-      return;
+    if(!billingClient||['ping','submit','status'].some(k=>typeof billingClient[k]!=='function')){
+      billingUiErrors.set(id,'ipc_unavailable');updateBillingUi();return;
     }
-    billingPending.add(id);
-    const version=commitVersion;
-    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+    billingPending.add(id);updateBillingUi();
+    const ticket=Date.now().toString(36)+'-'+(++billingTicketSequence).toString(36)+'-'+Math.random().toString(36).slice(2,10);
+    let stage='ping';
     try{
-      const result=await bounded(signal=>client.billing({id,action},{signal}),90000);
-      if(!result||typeof result.accepted!=='boolean'||!result.snapshot){
-        billingUiErrors.set(id,'ipc_unavailable');
-      }else{
-        if(!result.accepted)billingUiErrors.set(id,result.reason||'action_failed');
-        if(alive&&version===commitVersion){commitVersion++;showSnapshot(result.snapshot);notifySnapshot(result.snapshot);}
+      const version=await bounded(signal=>billingClient.ping({signal}),8000);
+      if(version!=='billing-v2'){billingUiErrors.set(id,'ipc_protocol');return;}
+      stage='submit';
+      const ack=await bounded(signal=>billingClient.submit({id,action,ticket},{signal}),10000);
+      if(ack!=='queued'){
+        billingUiErrors.set(id,['service_unavailable','invalid_action','busy'].includes(ack)?ack:'ipc_protocol');return;
       }
-    }catch(e){billingUiErrors.set(id,e?.message==='timeout'?'ipc_timeout':'ipc_unavailable');}
+      stage='status';
+      const until=Date.now()+120000;
+      while(Date.now()<until){
+        const result=await bounded(signal=>billingClient.status({id,ticket},{signal}),8000);
+        if(result==='pending'){
+          await new Promise(resolve=>setTimeout(resolve,500));
+          continue;
+        }
+        if(result!=='accepted')billingUiErrors.set(id,['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed','unknown'].includes(result)?result:'ipc_protocol');
+        return;
+      }
+      billingUiErrors.set(id,'ipc_timeout');
+    }catch(e){billingUiErrors.set(id,billingError(e,stage));}
     finally{
       billingPending.delete(id);
-      if(alive){
-        renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
-        void load(false);
-      }
+      updateBillingUi();
+      if(alive)void load(false);
     }
   }
   // Latest-click-wins UX. Render the requested account immediately, then
@@ -577,7 +605,9 @@ function createView(ctx,client,{compact=false}={}) {
   }
   refresh.addEventListener('click',()=>void load(true));
   const timer=setInterval(()=>void load(false),5000);
-  const destroy=()=>{alive=false;clearInterval(timer);disposeState();};
+  const billingUpdated=()=>{if(alive&&lastSnapshot)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);};
+  billingUiListeners.add(billingUpdated);
+  const destroy=()=>{alive=false;clearInterval(timer);disposeState();billingUiListeners.delete(billingUpdated);};
   if(!compact)onCleanup(destroy);
   void load();
   return {root,load,destroy};
@@ -673,7 +703,7 @@ function sidebarMount(documentRef=document){
     return classes.includes('size-full')&&classes.includes('flex-col');
   })||null;
 }
-function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
+function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}={}){
   const wrapper=$('div',`box-sizing:border-box;flex:0 0 auto;margin-top:auto;min-height:40px;display:flex;align-items:center;justify-content:flex-start;padding:4px 4px 0;border-top:1px solid ${palette.border}`);
   wrapper.setAttribute('data-pv-usage-sidebar','true');
   const button=add(wrapper,$('button',`box-sizing:border-box;width:32px;height:32px;min-width:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;border-radius:50%;background:transparent;color:${palette.text};border:0;padding:0;box-shadow:none;appearance:none`));
@@ -728,7 +758,7 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
     overlay=$('div',`position:fixed;z-index:9999;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;border:1px solid ${palette.border};border-radius:12px;box-shadow:0 16px 50px rgba(0,0,0,.32);background:var(--v2-background-bg-layer-02,var(--background,#18191d));color:${palette.text}`);
     overlay.setAttribute('role','dialog');overlay.setAttribute('aria-label',t(ctx,'usage.title'));overlay.setAttribute('data-pv-usage-popup','true');
     document.body.appendChild(overlay);
-    shown=createView(ctx,client,{compact:true});overlay.appendChild(shown.root);
+    shown=createView(ctx,client,{compact:true,billingClient});overlay.appendChild(shown.root);
     overlay.addEventListener('pointerenter',clearClose);overlay.addEventListener('pointerleave',later);overlay.addEventListener('focusout',later);
     position();
   };
@@ -777,10 +807,10 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
   void poll();
   return {wrapper,hide,destroy};
 }
-function attachSidebarButton(ctx,client){
+function attachSidebarButton(ctx,client,billingClient){
   if(typeof document==='undefined'||!document.body||typeof document.querySelector!=='function')return ()=>{};
   const updaterDock=nativeUpdate.createNativeUpdateDock();
-  const view=buildSidebarButton(ctx,client,{onResize:()=>updaterDock.sync(view.wrapper),getUpdaterBounds:updaterDock.bounds});
+  const view=buildSidebarButton(ctx,client,{billingClient,onResize:()=>updaterDock.sync(view.wrapper),getUpdaterBounds:updaterDock.bounds});
   let disposed=false,scheduled=null,observer=null;
   const mount=()=>{
     scheduled=null;if(disposed)return;
@@ -826,15 +856,17 @@ exports.default=Plugin.define({
   // No duplicate translations or static English-only strings are needed.
   setup(ctx){
     const client=ctx.main(Metrics);
+    let billingClient=null;
+    try{billingClient=ctx.main(BillingCommands);}catch{/* Metrics remain usable. */}
     const tab={id:'usage',get title(){return t(ctx,'usage.title');},closable:'compact',fallback:true};
     ctx.add(Panel,{id:'usage',region:'side',width:'narrow',
       mobile:{get title(){return t(ctx,'usage.title');},kind:'menu',order:45,icon:'status'},
-      list:input=>input.open.includes('usage')?[tab]:[],render:()=>createView(ctx,client).root});
+      list:input=>input.open.includes('usage')?[tab]:[],render:()=>createView(ctx,client,{billingClient}).root});
     const launch=()=>{const session=ctx.sessions.current();if(session)ctx.layout.open(`${ctx.id}:usage`,session,{tab:'select'});};
     ctx.add(Command,()=>({id:'open',title:t(ctx,'command.usage.view'),run:launch}));
     ctx.add(MenuItem,()=>({menu:'session.panel',id:'open',title:t(ctx,'usage.title'),icon:'status',
       opened:!!ctx.sessions.current()&&ctx.layout.state(`${ctx.id}:usage`,ctx.sessions.current())!=='closed',run:launch}));
-    return attachSidebarButton(ctx,client);
+    return attachSidebarButton(ctx,client,billingClient);
   },
   main(ctx){
     // OpenCode loads GUI bundles into a host-managed execution context where
@@ -890,7 +922,6 @@ exports.default=Plugin.define({
         void billingService.tick().catch(()=>{});
         return snapshot;
       },
-      billing:({id,action})=>billingService.action(id,action),
       activate:async ({id})=>{
         const current=await store.cached();
         const item=current.accounts.find(a=>a.id===id&&a.source==='OpenCode');
@@ -901,6 +932,21 @@ exports.default=Plugin.define({
         return result.status==='applied'?result.value:store.cached();
       },
     });
+    const billingCommands=billing.createBillingCommands(billingService,{
+      log:result=>{try{ctx.log?.write?.('info','Usage Dashboard Billing command',{result});}catch{}}
+    });
+    // The browser command channel is separately registered and returns only
+    // scalar acknowledgements/statuses. Failures must not disable metrics.
+    try{
+      ctx.provide(BillingCommands,{
+        ping:()=> 'billing-v2',
+        submit:input=>billingCommands.submit(input),
+        status:input=>billingCommands.status(input)
+      });
+      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v2'});}catch{}
+    }catch{
+      try{ctx.log?.write?.('warn','Usage Dashboard Billing IPC registration failed',{code:'B02'});}catch{}
+    }
     store.start();
     let disposed=false;
     void store.refresh(true).then(()=>{if(!disposed)billingService.start();}).catch(()=>{});
@@ -916,6 +962,6 @@ exports.default=Plugin.define({
     };
     const activeTimer=setInterval(()=>void sync(),20000);activeTimer.unref?.();
     void sync();
-    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();void billingService.stop().catch(()=>{});};
+    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();billingCommands.stop();void billingService.stop().catch(()=>{});};
   },
 });

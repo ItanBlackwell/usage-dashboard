@@ -352,4 +352,45 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   }
   return {action,tick,start,stop};
 }
-module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,findBrowser,createBillingSessions,STATES};
+const COMMAND_ERRORS=new Set(['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed']);
+function createBillingCommands(service,{log=()=>{}}={}) {
+  const active=new Map(),results=new Map();
+  let stopped=false;
+  const record=(id,ticket,result)=>{
+    if(stopped)return;
+    results.set(id,{ticket,result});
+    // Bound process-local diagnostic metadata. No credentials or URLs here.
+    if(results.size>80)results.delete(results.keys().next().value);
+    try{log(result);}catch{}
+  };
+  function submit({id,action,ticket}={}) {
+    if(stopped)return 'service_unavailable';
+    if(typeof id!=='string'||!id||id.length>120||
+      typeof ticket!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(ticket)||
+      !['open','confirm','disconnect'].includes(action))return 'invalid_action';
+    const running=active.get(id);
+    if(running)return running.ticket===ticket?'queued':'busy';
+    if(active.size>=80)return 'busy';
+    if(results.get(id)?.ticket===ticket)return 'queued';
+    const entry={ticket};
+    active.set(id,entry);
+    record(id,ticket,'pending');
+    // Do not keep the host IPC invocation open during browser startup, network
+    // navigation or a credential refresh. The main service owns this task.
+    entry.task=Promise.resolve().then(()=>stopped?null:service.action(id,action)).then(result=>{
+      if(stopped)return;
+      record(id,ticket,result?.accepted===true?'accepted':
+        COMMAND_ERRORS.has(result?.reason)?result.reason:'action_failed');
+    }).catch(()=>record(id,ticket,'action_failed')).finally(()=>{
+      if(active.get(id)===entry)active.delete(id);
+    });
+    return 'queued';
+  }
+  function status({id,ticket}={}) {
+    const entry=results.get(id);
+    return entry?.ticket===ticket?entry.result:'unknown';
+  }
+  function stop(){stopped=true;results.clear();}
+  return {submit,status,stop};
+}
+module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,findBrowser,createBillingSessions,createBillingCommands,STATES};

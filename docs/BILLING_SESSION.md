@@ -45,7 +45,10 @@ Clicking Connect Billing displays an immediate progress indicator. If the host
 cannot provide a usable account inventory, the plugin retries it once and
 reports the failure. Browser/runtime/IPC errors are shown on the account card
 and retained while the Desktop window remains open. They contain no private
-paths, URLs or authentication data.
+paths, URLs or authentication data. Codes B01–B05 distinguish a missing IPC
+client, failed connection check, rejected command, unavailable status and
+protocol mismatch. If an IPC code persists, report that code and the OpenCode
+Desktop version. Main-process diagnostics record only fixed command outcomes.
 
 - If login expires or the provider requires interactive verification, select
   **Reconnect Billing** and sign in manually again. No verification bypass

@@ -96,6 +96,32 @@ jobs:
             }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
+      - name: Verify independent Billing command transport
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const {createBillingCommands}=require('./src/billing-session.cjs');
+          (async()=>{
+            let finish, calls=0;
+            const task=new Promise(resolve=>{finish=resolve;});
+            const cmd=createBillingCommands({action:async()=>{calls++;return task;}});
+            const input={id:'openai:fixture',action:'open',ticket:'request-1'};
+            assert.equal(cmd.submit(input),'queued');
+            assert.equal(cmd.status(input),'pending');
+            assert.equal(cmd.submit(input),'queued');
+            assert.equal(cmd.submit({...input,ticket:'request-2'}),'busy');
+            await new Promise(resolve=>setImmediate(resolve));
+            assert.equal(calls,1);
+            finish({accepted:false,reason:'inventory_unavailable'});
+            await new Promise(resolve=>setImmediate(resolve));
+            assert.equal(cmd.status(input),'inventory_unavailable');
+            assert.equal(cmd.status({...input,ticket:'wrong'}),'unknown');
+            assert.equal(cmd.submit({...input,action:'other'}),'invalid_action');
+            cmd.stop();
+            assert.equal(cmd.submit(input),'service_unavailable');
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
       - name: Package and verify archives without test scripts or secrets
         shell: bash
         run: |
