@@ -11,7 +11,7 @@ const path = require('node:path');
 const root = __dirname;
 const oldCore = fs.readFileSync(path.join(root,'src/core.cjs'),'utf8');
 const accounts = fs.readFileSync(path.join(root,'src/accounts.cjs'),'utf8');
-const providerModules=['provider-metrics','provider-claude','provider-kimi','provider-zai','provider-minimax'];
+const providerModules=['provider-metrics','provider-claude','provider-kimi','provider-zai','provider-minimax','local-usage'];
 const moduleVar=name=>'__'+name.replaceAll('-','_');
 const inlineProviders=source=>providerModules.reduce((text,name)=>text.replaceAll("require('./"+name+".cjs')",moduleVar(name)+'.exports'),source);
 const providerBundle=providerModules.map(name=>{

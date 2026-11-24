@@ -10,7 +10,8 @@ const path = require('node:path');
 const os = require('node:os');
 const providerMetrics = require('./provider-metrics.cjs');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0});
+const localUsage = require('./local-usage.cjs');
+const EMPTY = () => ({accounts:[],organizations:[],localUsage:{today:null,month:null},inventoryWarning:null,checkedAt:0});
 const BUDGET_MESSAGES=new Set(['experimental_budget','no_budgets','unauthorized','forbidden','rate_limited','request_failed','invalid_payload','invalid_balance','unsupported_console','workspace_required','credential_not_readable','login_expired','login_required','plugin_ipc_unavailable']);
 function sanitizeBudgets(value){
   if(!Array.isArray(value)||value.length>100)return [];
@@ -69,6 +70,7 @@ function sanitizeSnapshot(value) {
     limitType:String(o.limitType||'custom').slice(0,24),
     checkedAt:Number.isFinite(o.checkedAt)?o.checkedAt:0,
   }));
+  result.localUsage=localUsage.cleanLocalUsage(value.localUsage);
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
   return result;

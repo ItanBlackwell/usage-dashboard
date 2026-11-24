@@ -313,7 +313,7 @@ jobs:
             assert.ok(start>=0&&end>start);
             const el=(tag,style,text='')=>({tag,style,textContent:text,childNodes:[],attrs:{},setAttribute(k,v){this.attrs[k]=v;},addEventListener(){},remove(){this.removed=true;}});
             const add=(parent,child)=>(parent.childNodes.push(child),child);
-            const render=new Function('$','add','palette','money','currencyAmount','pct','displayWindow','expandedAccountDetails',source.slice(start,end)+';return renderProviderDetails;')(el,add,{muted:'#888'},v=>presentation.formatCurrency(v,'USD'),presentation.formatCurrency,n=>n+'%',(_,s)=>s,new Set());
+            const render=new Function('$','add','palette','money','currencyAmount','pct','displayWindow','expandedAccountDetails','presentation',source.slice(start,end)+';return renderProviderDetails;')(el,add,{muted:'#888'},v=>presentation.formatCurrency(v,'USD'),presentation.formatCurrency,n=>n+'%',(_,s)=>s,new Set(),presentation);
             const root=el('div',''),ctx={locale:{locale:()=> 'ru'}};
             render(ctx,root,unsupported);
             const all=n=>[n,...n.childNodes.flatMap(all)];
@@ -325,6 +325,72 @@ jobs:
             assert.ok(!all(modernRoot).some(n=>n.textContent.includes('не задан')||n.textContent.includes('нет настроенных лимитов')));
             const deniedRoot=el('div','');render(ctx,deniedRoot,partial);
             assert.ok(all(deniedRoot).some(n=>n.attrs['data-pv-metric-notice']==='forbidden'&&n.textContent.includes('403')));
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
+      - name: Verify local usage estimates and compact spending display
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs');
+          const u=require('./src/local-usage.cjs');
+          const p=require('./src/presentation.cjs');
+          const cache=require('./src/cache.cjs');
+          const {providerFor}=require('./src/accounts.cjs');
+          const now=Date.parse('2026-11-24T15:00:00Z');
+          const tokens={input:100,output:10,reasoning:2,cache:{read:3,write:4}};
+          const model=(providerID,cost,steps=1,t=tokens)=>({model:{providerID,modelID:'private-model'},cost,steps,tokens:t});
+          const data={models:[model('openai',0.002),model('codex',0.003),model('google',0),model('custom-gateway',99)]};
+          (async()=>{
+            const requests=[];
+            const usage=await u.readLocalUsage({experimental:{session:{stats:async(input,options)=>{
+              requests.push(input);assert.ok(options.signal);return {data};
+            }}}},providerFor,now);
+            assert.deepEqual(requests.map(r=>r.from),[Date.parse('2026-11-24T00:00:00Z'),Date.parse('2026-11-01T00:00:00Z')]);
+            assert.ok(requests.every(r=>r.to===now&&r.timezone==='UTC'&&r.tools==='none'));
+            assert.deepEqual(usage.today.rows,[{provider:'codex',cost:0.005,tokens:238,steps:2},{provider:'gemini',cost:0,tokens:119,steps:1}]);
+            assert.deepEqual(usage.month.rows,usage.today.rows);
+            assert.deepEqual(u.parseStats({models:[model('openai',null),model('openai',2,1,{})]},providerFor),[{provider:'codex',cost:null,tokens:null,steps:2}]);
+            assert.deepEqual(u.parseStats({models:[]},providerFor),[]);
+            assert.throws(()=>u.parseStats({models:[{}]},providerFor),/invalid_local_stats/);
+            assert.deepEqual(await u.readLocalUsage({},providerFor,now),{today:null,month:null});
+            const partial=await u.readLocalUsage({session:{stats:async input=>{if(input.from===requests[0].from)throw Error('failure');return data;}}},providerFor,now);
+            assert.equal(partial.today,null);assert.ok(partial.month);
+            assert.deepEqual(cache.sanitizeSnapshot({localUsage:usage}).localUsage,usage);
+            assert.ok(!JSON.stringify(usage).includes('private-model'));
+            assert.equal(u.cleanLocalUsage({today:{...usage.today,rows:[{provider:'other',cost:4,tokens:1,steps:1}]}}).today,null);
+            assert.equal(u.cleanLocalUsage({today:{...usage.today,rows:[usage.today.rows[0],usage.today.rows[0]]}}).today,null);
+            assert.equal(p.localUsagePeriod({localUsage:usage},'today',now),usage.today);
+            assert.equal(p.localUsagePeriod({localUsage:usage},'today',now+86400000),null);
+            assert.equal(p.localUsagePeriod({localUsage:usage},'month',Date.parse('2026-12-01T00:00:00Z')),null);
+            assert.equal(p.formatSpend(0.002,'USD'),'$0.002');
+            assert.equal(p.formatSpend(0,'USD'),'$0.00');
+            assert.equal(p.formatSpend(null,'USD'),'—');
+            assert.equal(p.formatSpend(0.00000001,'USD'),'<$0.000001');
+            assert.equal(p.needsLocalUsage({kind:'api',provider:'codex',balance:null},now),true);
+            assert.equal(p.needsLocalUsage({kind:'subscription',windows:[{remainingPercent:0,resetsAt:now+1}]},now),false);
+            assert.equal(p.needsLocalUsage({kind:'subscription',windows:[{remainingPercent:50,resetsAt:now}]},now),true);
+            const source=fs.readFileSync('src/gui-entry.cjs','utf8');
+            const el=(tag,style,text='')=>({tag,style,textContent:text,childNodes:[],attrs:{},setAttribute(k,v){this.attrs[k]=v;},addEventListener(){},remove(){}});
+            const add=(parent,child)=>(parent.childNodes.push(child),child);
+            const all=n=>[n,...n.childNodes.flatMap(all)];
+            const ctx={locale:{locale:()=> 'ru'}};
+            const local=new Function('$','add','palette','presentation','compactCard','providerLabel','note','Date',
+              source.slice(source.indexOf('function renderLocalUsage('),source.indexOf('function renderLimits('))+';return renderLocalUsage;')
+              (el,add,{text:'#fff',muted:'#888',border:'#444'},p,parent=>add(parent,el('div','')),x=>x,x=>el('span','',x),class extends Date{static now(){return now;}});
+            const root=el('div','');local(ctx,root,{localUsage:usage},[{kind:'api',provider:'codex'},{kind:'api',provider:'codex'},{kind:'api',provider:'gemini'},{kind:'api',provider:'qwen'}]);
+            assert.equal(all(root).filter(n=>n.textContent==='codex').length,1);
+            assert.ok(all(root).some(n=>n.textContent==='≈ $0.005'));
+            assert.ok(all(root).some(n=>n.textContent==='≈ $0.00'));
+            assert.ok(all(root).some(n=>n.textContent==='Нет данных'));
+            assert.ok(all(root).some(n=>n.textContent.includes('не списания')));
+            const render=new Function('$','add','palette','money','currencyAmount','pct','displayWindow','expandedAccountDetails','presentation',
+              source.slice(source.indexOf('function renderProviderDetails('),source.indexOf('function renderConsoleBudgets('))+';return renderProviderDetails;')
+              (el,add,{muted:'#888'},v=>p.formatCurrency(v,'USD'),p.formatCurrency,n=>n+'%',(_,s)=>s,new Set(),p);
+            const remote=el('div','');render(ctx,remote,{kind:'api',provider:'openrouter',state:'ok',message:'ok',
+              metrics:[{code:'key_daily',currency:'USD',value:0.005},{code:'key_total',currency:'USD',value:2},{code:'byok_total',currency:'USD',value:1}],notices:[]});
+            assert.ok(remote.childNodes[0].childNodes.some(n=>n.tag!=='details'&&all(n).some(x=>x.textContent==='$0.005')));
+            assert.ok(remote.childNodes[0].childNodes.some(n=>n.tag!=='details'&&all(n).some(x=>x.textContent==='Расход ключа · всего')));
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
       - name: Package and verify archives without test scripts or secrets

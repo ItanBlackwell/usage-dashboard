@@ -2,6 +2,13 @@
 
 ## 0.13.0 (unreleased)
 
+- Surface provider spending, usage and request counters without expanding
+  account details; preserve sub-cent costs. Show separate provider-level local
+  OpenCode estimates for today and the current UTC month when a balance,
+  budget or quota is unavailable. Never attribute local statistics to individual
+  credentials or treat model cost as a confirmed debit. Use the host statistics
+  API without collecting chat content or creating another usage ledger.
+
 - Read OpenRouter's applicable and effective budget policies, including shared
   workspace and guardrail caps, and the daily free-model counter from the
   existing key. Distinguish missing budget metadata from no configured budgets.

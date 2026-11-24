@@ -80,8 +80,24 @@ fields. Money amounts retain their currency.
 
 ## Display and privacy
 
-The card displays compact metric rows and a visible availability message for
-unsupported or inaccessible metrics. More metrics expands secondary rows.
+The card displays provider spending and usage counters directly, including
+key spending by period, organization usage, and available token or request
+counts. More metrics expands secondary rows. Small positive expenses retain
+sub-cent precision. Availability messages remain visible.
+
+When an API wallet or general spending cap, or a subscription quota, is
+unavailable, a separate local usage block shows today's and the current month's
+recorded model cost, tokens and steps by provider (UTC). It uses the host's
+[experimental session statistics API](https://opencode.ai/docs/api)
+(`experimental.session.stats`, `tools: none`) with two bounded read-only
+requests per refresh. Only known provider IDs are recognized; custom aliases
+are not inferred from model names. Local statistics may include subscription
+usage or imported history and do not include usage outside this server. They
+are not provider charges and cannot identify historical credentials. Totals are
+shown once per provider, never apportioned across accounts. Missing model rows
+or failed reads remain unavailable; previous UTC periods are not shown as
+current. Only aggregate numbers and period timestamps are cached, not chat
+content, model identifiers, session identifiers or a second usage ledger.
 Authentication failures, permission errors, missing data, experimental
 contracts and unsupported APIs are separate states. The sidebar continues to
 prefer a real balance, or shows a separately marked key/general budget when

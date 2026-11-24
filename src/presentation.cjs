@@ -103,7 +103,7 @@ function mergeInventoryFallback(inventory,previous) {
       budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
       checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={accounts,organizations:inventory?.organizations||[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
+  const merged={accounts,organizations:inventory?.organizations||[],localUsage:{today:null,month:null},inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
   return merged;
 }
 function formatCurrency(amount,currency) {
@@ -150,6 +150,29 @@ function indicatorPresentation(account,snapshot) {
   if(windows.other!==null)return {mode:'single',kind:'other',value:windows.other};
   return {mode:'unavailable'};
 }
+// Preserve sub-cent expenses without rounding positive costs down to zero.
+function formatSpend(amount,currency){
+  if(!Number.isFinite(amount)||!['USD','CNY'].includes(currency))return '—';
+  const prefix=currency==='CNY'?'¥':'$',absolute=Math.abs(amount);
+  if(absolute>0&&absolute<0.000001)return (amount<0?'−':'')+'<'+prefix+'0.000001';
+  return (amount<0?'−':'')+prefix+absolute.toLocaleString('en-US',{useGrouping:false,minimumFractionDigits:2,maximumFractionDigits:absolute<1?6:2});
+}
+function needsLocalUsage(account,now=Date.now()){
+  if(account?.kind==='api'){
+    const wallet=account.balance?.kind==='balance'&&Number.isFinite(account.balance.amount);
+    return !wallet||!(openRouterBudget(account,now)||tightestGeneralBudget(account,now));
+  }
+  if(account?.kind==='subscription')return ![...(account.windows||[]),...(account.modelWindows||[])].some(w=>
+    Number.isFinite(w.remainingPercent)&&w.remainingPercent>=0&&w.remainingPercent<=100&&
+    (w.resetsAt==null||Number.isFinite(w.resetsAt)&&w.resetsAt>now));
+  return false;
+}
+function localUsagePeriod(snapshot,period,now=Date.now()){
+  if(!['today','month'].includes(period))return null;
+  const v=snapshot?.localUsage?.[period],d=new Date(now);
+  const from=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),period==='today'?d.getUTCDate():1);
+  return v&&v.from===from&&Number.isFinite(v.to)&&v.to>from&&v.to<=now&&Array.isArray(v.rows)?v:null;
+}
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,openRouterBudget,formatCurrency,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,openRouterBudget,formatCurrency,formatSpend,needsLocalUsage,localUsagePeriod,mergeInventoryFallback };
 

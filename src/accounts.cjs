@@ -15,6 +15,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const base = require('./core.cjs');
 const metrics = require('./provider-metrics.cjs');
+const localUsage = require('./local-usage.cjs');
 const claudeApi = require('./provider-claude.cjs');
 const kimiExtras = require('./provider-kimi.cjs');
 const zaiApi = require('./provider-zai.cjs');
@@ -771,8 +772,8 @@ function makeDashboardMonitor({ client, endpoint, env = process.env, home = os.h
     return pending[which];
   }
   return {async get(force=false) {
-    const [accounts,orgs]=await Promise.all([load('accounts',force),load('orgs',force)]);
-    return {accounts:accounts.accounts,organizations:orgs.organizations,
+    const [accounts,orgs,usage]=await Promise.all([load('accounts',force),load('orgs',force),localUsage.readLocalUsage(client,providerFor,clock())]);
+    return {accounts:accounts.accounts,organizations:orgs.organizations,localUsage:usage,
       inventoryWarning:accounts.inventoryWarning || null,checkedAt:Math.max(accounts.checkedAt,orgs.checkedAt)};
   }};
 }
