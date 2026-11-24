@@ -49,8 +49,12 @@ See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
   data to this plugin.
 - Supported account connections include OpenAI/Codex, Anthropic/Claude,
   DeepSeek, Moonshot/Kimi, Kimi Coding, OpenRouter, Z.AI/GLM, MiniMax,
-  Google Gemini and Alibaba Qwen. Actual quota/balance availability depends
-  on the account type, provider API and authorization method.
+  Google Gemini, Alibaba Qwen, OpenCode (pay-as-you-go / Zen) and OpenCode Go.
+  Actual quota/balance availability depends on the account type, provider API
+  and authorization method.
+- OpenCode Go uses the [official usage endpoint](https://opencode.ai/docs/console/go/#usage)
+  for 5-hour, weekly and monthly limits. Connected OpenCode pay-as-you-go
+  accounts are displayed even when their credit balance is unavailable.
 - Missing data is shown as unavailable, never assumed to mean a zero balance.
 - The experimental OpenCode GUI SDK may change without backward compatibility.
 
