@@ -253,6 +253,382 @@ module.exports = {
 };
 
 })(__old,__old.exports);
+const __provider_metrics={exports:{}}; (function(module,exports){
+/*
+ * Usage Dashboard
+ * Copyright (c) 2026 ItanBlackwell.
+ * SPDX-License-Identifier: MPL-2.0
+ * Source: https://github.com/ItanBlackwell/usage-dashboard
+ */
+'use strict';
+
+// Shared public-safe financial/usage metric contract. Never carry raw response
+// objects, labels, credential IDs, private workspace names, or error text.
+const SPEC=Object.freeze({
+  topped_up:'money',granted:'money',cash:'money',voucher:'money',
+  key_daily:'money',key_weekly:'money',key_monthly:'money',key_total:'money',
+  byok_daily:'money',byok_weekly:'money',byok_monthly:'money',byok_total:'money',
+  wallet_total_credits:'money',wallet_total_usage:'money',
+  org_month_cost:'money',org_model_cost:'money',org_month_tokens:'count',org_month_requests:'count',
+  org_model_tokens:'count',org_model_requests:'count',
+  extra_balance:'money',extra_total:'money',extra_month_used:'money',extra_month_limit:'money',
+  model_tokens_24h:'count',model_requests_24h:'count',tokens_24h:'count',requests_24h:'count',
+  search_24h:'count',web_read_24h:'count',zread_24h:'count',tool_calls_24h:'count',
+  grant_remaining:'money',grant_used:'money',
+  plan_parallel:'count'
+});
+const GROUPS=new Set(['balance','budget','usage','cost','tokens','extra','tools','grants','breakdown','quota']);
+const STATUSES=new Set(['unsupported','forbidden','unauthorized','rate_limited','request_failed','invalid_payload','invalid_balance','missing_windows','missing_rate_limits','no_limit','no_balance_access','no_prepaid_balance','not_returned','no_budgets','experimental','insufficient_balance','login_expired','credential_not_readable','workspace_required','unsupported_console','plugin_ipc_unavailable','stale','quota_unavailable']);
+const num=x=>(typeof x==='number'||typeof x==='string'&&x.trim()!=='')&&Number.isFinite(Number(x))?Number(x):null;
+const nonnegative=x=>{const n=num(x);return n!==null&&n>=0&&n<=1e12?n:null;};
+const count=x=>{const n=num(x);return Number.isSafeInteger(n)&&n>=0&&n<=1e15?n:null;};
+function safeModel(value){
+  // Allow known provider model identifiers, not arbitrary strings from a
+  // response (e.g. an account label, API key, email or user-defined name).
+  if(typeof value!=='string'||value.length>80||!/^(?:claude[-_]|glm[-_]|minimax[-_]|coding-plan|kimi[-_]|moonshot[-_]|deepseek[-_])[A-Za-z0-9_.-]*$/i.test(value))return null;
+  return value;
+}
+function metric(code,value,{currency=null,model=null,at=null}={}){
+  const unit=SPEC[code];
+  if(!Object.hasOwn(SPEC,code)||!unit)return null;
+  const n=unit==='count'?count(value):num(value);
+  if(n===null||Math.abs(n)>1e15||unit==='money'&&!['USD','CNY'].includes(currency)||
+    unit==='money'&&Math.abs(n)>1e12||unit==='money'&&n<0&&!['cash','topped_up','org_month_cost','org_model_cost','extra_balance'].includes(code)||
+    unit==='date'&&(!Number.isSafeInteger(n)||n<=0||n>8640000000000000))return null;
+  const name=model===null?null:safeModel(model);
+  if(model!==null&&!name)return null;
+  if(['org_model_cost','org_model_tokens','org_model_requests','model_tokens_24h','model_requests_24h'].includes(code)&&!name)return null;
+  return {code,value:n===0?0:n,currency:unit==='money'?currency:null,model:name,
+    at:Number.isFinite(at)&&at>0&&at<=8640000000000000?at:null};
+}
+function cleanMetrics(rows){
+  if(!Array.isArray(rows))return [];
+  return rows.slice(0,120).flatMap(r=>{
+    if(!r||typeof r.value!=='number')return [];
+    const m=metric(r.code,r.value,{currency:r.currency??null,model:r.model??null,at:r.at??null});
+    return m?[m]:[];
+  });
+}
+function cleanNotices(rows){
+  if(!Array.isArray(rows))return [];
+  const seen=new Set();
+  return rows.slice(0,24).filter(r=>r&&GROUPS.has(r.group)&&STATUSES.has(r.status))
+    .filter(r=>{const key=r.group+':'+r.status;if(seen.has(key))return false;seen.add(key);return true;})
+    .map(r=>({group:r.group,status:r.status}));
+}
+function cleanKeyBudget(v){
+  if(!v||typeof v!=='object')return null;
+  const n=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0&&x<=1e12?x:null;
+  const date=x=>typeof x==='number'&&Number.isSafeInteger(x)&&x>0&&x<=8640000000000000?x:null;
+  const period=['daily','weekly','monthly','none'].includes(v.period)?v.period:null;
+  return {limit:n(v.limit),remaining:n(v.remaining),period,resetsAt:date(v.resetsAt),expiresAt:date(v.expiresAt),
+    includeByok:typeof v.includeByok==='boolean'?v.includeByok:null,freeTier:typeof v.freeTier==='boolean'?v.freeTier:null};
+}
+function reason(error){return STATUSES.has(error?.message)?error.message:'request_failed';}
+module.exports={SPEC,metric,cleanMetrics,cleanNotices,cleanKeyBudget,nonnegative,count,num,safeModel,reason};
+
+})(__provider_metrics,__provider_metrics.exports);
+const __provider_claude={exports:{}}; (function(module,exports){
+/*
+ * Usage Dashboard
+ * Copyright (c) 2026 ItanBlackwell.
+ * SPDX-License-Identifier: MPL-2.0
+ * Source: https://github.com/ItanBlackwell/usage-dashboard
+ */
+'use strict';
+
+// Documented beta organization analytics; a regular workspace API key may
+// be denied. Read only through the exact already-connected credential.
+// Never attribute organization-wide totals to one key.
+const M=__provider_metrics.exports;
+const BASE='https://api.anthropic.com/v1/organizations/analytics/';
+const MAX_PAGES=4;
+const parsePage=(body,type)=>{
+  if(!body||!Array.isArray(body.data)||body.data.length>1000||typeof body.has_more!=='boolean')
+    throw new Error('invalid_payload');
+  return body.data.map(row=>{
+    if(!row||!row.group||typeof row.group!=='object')throw new Error('invalid_payload');
+    const model=M.safeModel(row.group.model);
+    if(type==='cost'){
+      const n=M.num(row.cost?.amount);
+      if(row.cost?.currency!=='USD'||n===null||Math.abs(n)>1e14)throw new Error('invalid_payload');
+      return {model,cost:n/100};
+    }
+    const tokens=M.count(row.usage?.total_tokens),requests=M.count(row.usage?.requests);
+    if(tokens===null||requests===null)throw new Error('invalid_payload');
+    return {model,tokens,requests};
+  });
+};
+async function read(type,entry,fetchSafe,fetcher,now){
+  const url=new URL(BASE+type);
+  const date=new Date(now),start=new Date(Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),1));
+  url.searchParams.set('starting_at',start.toISOString());
+  url.searchParams.set('ending_at',new Date(Math.max(now,start.getTime()+1000)).toISOString());
+  url.searchParams.set('limit','100');
+  url.searchParams.append('group_by[]','model');
+  const headers={'x-api-key':entry.apiKey,Accept:'application/json',
+    'anthropic-version':'2026-10-21','anthropic-beta':'analytics-usage-cost-2026-08-24'};
+  const rows=[],pages=new Set();
+  let refreshedAt=null;
+  for(let i=0;i<MAX_PAGES;i++){
+    const body=await fetchSafe(url.toString(),headers,fetcher);
+    // The service explicitly uses null plus an empty list when data is
+    // not ready. Never report this as a confirmed zero.
+    const refreshed=typeof body?.data_refreshed_at==='string'?Date.parse(body.data_refreshed_at):NaN;
+    if(!Number.isFinite(refreshed)||refreshed<start.getTime())throw Error('not_returned');
+    if(refreshedAt!==null&&refreshedAt!==refreshed)throw Error('invalid_payload');
+    refreshedAt=refreshed;
+    rows.push(...parsePage(body,type));
+    if(!body.has_more){
+      // A valid complete report is required before summing. Unattributed or
+      // unrecognized model rows still contribute to the organization total.
+      const totals={},models=new Map();
+      for(const row of rows){
+        for(const field of type==='cost'?['cost']:['tokens','requests']){
+          totals[field]=(totals[field]??0)+row[field];
+          if(row.model){
+            const m=models.get(row.model)||{};
+            m[field]=(m[field]??0)+row[field];models.set(row.model,m);
+          }
+        }
+      }
+      const empty=type==='cost'?{cost:0}:{tokens:0,requests:0};
+      const metrics=[];
+      const push=(code,val,model=null)=>{const m=M.metric(code,val,{currency:code.endsWith('cost')?'USD':null,model,at:refreshedAt});if(!m)throw Error('invalid_payload');metrics.push(m);};
+      for(const [field,value] of Object.entries({...empty,...totals}))push('org_month_'+field,value);
+      const ranked=[...models].sort((a,b)=>(b[1].cost??b[1].tokens??0)-(a[1].cost??a[1].tokens??0));
+      for(const [model,values] of ranked.slice(0,16))for(const [field,value] of Object.entries(values))push('org_model_'+field,value,model);
+      return metrics;
+    }
+    const next=body.next_page;
+    if(typeof next!=='string'||!next||next.length>1024||pages.has(next))throw Error('invalid_payload');
+    pages.add(next);url.searchParams.set('page',next);
+  }
+  throw Error('invalid_payload');
+}
+async function query(entry,fetchSafe,fetcher,now){
+  if(!entry.apiKey)return {state:'unavailable',message:'credential_not_readable',notices:[{group:'usage',status:'credential_not_readable'}]};
+  const results=await Promise.allSettled([read('cost',entry,fetchSafe,fetcher,now),read('usage',entry,fetchSafe,fetcher,now)]);
+  const notices=[{group:'balance',status:'unsupported'},{group:'budget',status:'unsupported'}];
+  const metrics=[];
+  for(let i=0;i<results.length;i++){
+    const r=results[i],group=i===0?'cost':'tokens';
+    if(r.status==='fulfilled'){metrics.push(...r.value);notices.push({group,status:'experimental'});}
+    else notices.push({group,status:M.reason(r.reason)});
+  }
+  return {state:metrics.length?'ok':'error',message:'no_usage_endpoint',metrics,notices};
+}
+module.exports={query,parsePage};
+
+})(__provider_claude,__provider_claude.exports);
+const __provider_kimi={exports:{}}; (function(module,exports){
+/*
+ * Usage Dashboard
+ * Copyright (c) 2026 ItanBlackwell.
+ * SPDX-License-Identifier: MPL-2.0
+ * Source: https://github.com/ItanBlackwell/usage-dashboard
+ */
+'use strict';
+
+// Experimental additions on the existing Kimi Code endpoint only. The
+// managed CLI's separate OAuth service is deliberately not contacted.
+const M=__provider_metrics.exports;
+function parseExtras(body,existing,timestamp){
+  const windows=[...existing],metrics=[],notices=[];
+  const modern=body?.code===0&&body?.data?.kind==='ok'?body.data.quota:null;
+  const source=modern?.usages||body?.usages;
+  // Prefer legacy enforced counters to summary ratios if both are present.
+  // New ratios have been reported as zero despite active use; do not replace
+  // measured windows with them, and label summary-only data experimental.
+  for(const [keys,label] of [
+    [['limit5h','limit_5h'],'5-hour'],[['limit7d','limit_7d'],'Weekly'],
+    [['monthTotal','limit_month_total'],'Monthly'],[['monthCode','limit_month_code'],'Monthly · Code']
+  ]){
+    if(windows.some(w=>w.label===label))continue;
+    const item=keys.map(k=>source?.[k]).find(v=>v&&typeof v==='object');
+    const used=item?.usedRatio??item?.used_ratio;
+    if(typeof used!=='number'||!Number.isFinite(used)||used<0||used>1)continue;
+    // A zero from the summary-only 5h/weekly field is not reliable enough.
+    if(used===0&&(label==='5-hour'||label==='Weekly'))continue;
+    windows.push({label,usedPercent:used*100,remainingPercent:(1-used)*100,resetsAt:timestamp(item.resetAt??item.reset_time)});
+    if(!notices.some(n=>n.group==='quota'))notices.push({group:'quota',status:'experimental'});
+  }
+  const parallel=M.metric('plan_parallel',body?.parallel?.limit);
+  if(parallel)metrics.push(parallel);
+  const x=modern?.extraUsage??body?.extraUsage??body?.extra_usage;
+  let extraCount=0;
+  const currency=x?.currency;
+  if(x&&['USD','CNY'].includes(currency)){
+    for(const [field,alt,code] of [['balanceCents','balance_cents','extra_balance'],['totalCents','total_cents','extra_total'],
+      ['monthlyUsedCents','monthly_used_cents','extra_month_used'],['monthlyChargeLimitCents','monthly_charge_limit_cents','extra_month_limit']]){
+      if(code==='extra_month_limit'&&(x.monthlyChargeLimitEnabled??x.monthly_charge_limit_enabled)!==true)continue;
+      const value=code==='extra_balance'?M.num(x[field]??x[alt]):M.nonnegative(x[field]??x[alt]);
+      if(value!==null){const row=M.metric(code,value/100,{currency});if(row){metrics.push(row);extraCount++;}}
+    }
+  }
+  if(!extraCount)notices.push({group:'extra',status:'not_returned'});
+  else notices.push({group:'extra',status:'experimental'});
+  if(!windows.length)notices.push({group:'quota',status:'missing_windows'});
+  return {windows,metrics,notices};
+}
+module.exports={parseExtras};
+
+})(__provider_kimi,__provider_kimi.exports);
+const __provider_zai={exports:{}}; (function(module,exports){
+/*
+ * Usage Dashboard
+ * Copyright (c) 2026 ItanBlackwell.
+ * SPDX-License-Identifier: MPL-2.0
+ * Source: https://github.com/ItanBlackwell/usage-dashboard
+ */
+'use strict';
+
+// Experimental monitor routes used by the provider's own coding usage tool.
+// All hosts and paths are fixed. Keep each optional response independent.
+const M=__provider_metrics.exports;
+function data(body){
+  if(body?.success!==true||!body.data||typeof body.data!=='object')throw Error('invalid_payload');
+  return body.data;
+}
+function modelMetrics(body){
+  const d=data(body),total=d.totalUsage,rows=[];
+  const add=(code,v,model=null)=>{const m=M.metric(code,v,{model});if(m)rows.push(m);};
+  add('tokens_24h',total?.totalTokensUsage);add('requests_24h',total?.totalModelCallCount);
+  // The same summary can appear twice. Read a single source; do not sum copies.
+  const summary=Array.isArray(d.modelSummaryList)?d.modelSummaryList:total?.modelSummaryList;
+  const seen=new Set();
+  for(const item of Array.isArray(summary)?summary.slice(0,40):[]){
+    const name=M.safeModel(item?.modelName);
+    if(!name||seen.has(name))continue;
+    seen.add(name);add('model_tokens_24h',item.totalTokens,name);
+    add('model_requests_24h',item.totalModelCallCount,name);
+  }
+  if(!rows.length)throw Error('invalid_payload');
+  return rows;
+}
+function toolMetrics(body){
+  const d=data(body),total=d.totalUsage,rows=[];
+  for(const [field,code] of [['totalNetworkSearchCount','search_24h'],['totalWebReadMcpCount','web_read_24h'],['totalZreadMcpCount','zread_24h'],['totalSearchMcpCount','tool_calls_24h']]){
+    const m=M.metric(code,total?.[field]);if(m)rows.push(m);
+  }
+  if(!rows.length)throw Error('invalid_payload');
+  return rows;
+}
+function grantMetrics(body,now){
+  // This undocumented endpoint has no stable public schema. Accept only
+  // an explicit currency and amount/used amount/expiry in a recognized list.
+  // Never translate unspecified units or aggregate grants into wallet money.
+  if(body?.success===false||body?.code!==undefined&&![0,200].includes(body.code))throw Error('invalid_payload');
+  const grants=Array.isArray(body?.data)?body.data:Array.isArray(body?.data?.credit_grants)?body.data.credit_grants:body?.credit_grants;
+  if(!Array.isArray(grants)||grants.length>100||body?.has_more===true||body?.data?.has_more===true)throw Error('invalid_payload');
+  const rows=[];
+  for(const v of grants){
+    const total=M.nonnegative(v?.amount),used=M.nonnegative(v?.used_amount),currency=v?.currency;
+    const at=typeof v?.expire_at==='string'?Date.parse(v.expire_at):null;
+    if(total===null||used===null||used>total||!['USD','CNY'].includes(currency)||!Number.isFinite(at)||at<=0)throw Error('invalid_payload');
+    if(at<=now)continue;
+    rows.push(M.metric('grant_remaining',total-used,{currency,at}),M.metric('grant_used',used,{currency,at}));
+  }
+  return rows.filter(Boolean);
+}
+async function query(entry,fetchSafe,fetcher,now,parseQuota){
+  const cn=entry.integrationID.startsWith('zhipuai')||entry.integrationID==='zai-cn-coding-plan';
+  const host=cn?'https://open.bigmodel.cn':'https://api.z.ai';
+  const token=entry.apiKey||entry.access;
+  const raw={Authorization:token,Accept:'application/json','Accept-Language':'en-US,en'};
+  const bearer={...raw,Authorization:'Bearer '+token};
+  // Preserve the previously working bearer quota request. The monitor
+  // script uses the raw token; retry that form only on auth failure.
+  const monitor=async(path,params='',preferRaw=true)=>{
+    const url=host+'/api/monitor/usage/'+path+params;
+    try{return await fetchSafe(url,preferRaw?raw:bearer,fetcher);}
+    catch(e){if(!['unauthorized','forbidden'].includes(e?.message))throw e;
+      return fetchSafe(url,preferRaw?bearer:raw,fetcher);}
+  };
+  const wall=ms=>new Date(ms+8*3600000).toISOString().slice(0,19).replace('T',' ');
+  const params='?startTime='+encodeURIComponent(wall(now-86400000))+'&endTime='+encodeURIComponent(wall(now));
+  const jobs=[
+    monitor('quota/limit','',false).then(parseQuota),
+    monitor('model-usage',params).then(modelMetrics),
+    monitor('tool-usage',params).then(toolMetrics),
+    fetchSafe(host+'/api/paas/v4/user/credit_grants',bearer,fetcher).then(x=>grantMetrics(x,now))
+  ];
+  const results=await Promise.allSettled(jobs),metrics=[],notices=[{group:'balance',status:'unsupported'},{group:'budget',status:'unsupported'}];
+  let windows=[],quotaMessage='no_usage_endpoint';
+  // Monitor cost units and subscription billing semantics are not stable.
+  // Do not manufacture a monetary cost from token counts.
+  notices.push({group:'cost',status:'not_returned'});
+  for(let i=0;i<results.length;i++){
+    const group=['quota','usage','tools','grants'][i],r=results[i];
+    if(r.status==='fulfilled'){
+      if(i===0){windows=r.value.windows;quotaMessage='experimental_quota';}
+      else metrics.push(...r.value);
+      notices.push({group,status:i===3&&!r.value.length?'not_returned':'experimental'});
+    }else{
+      const status=M.reason(r.reason);
+      notices.push({group,status});
+      if(i===0)quotaMessage=status;
+    }
+  }
+  return {state:windows.length||metrics.length?'ok':'error',kind:windows.length?'subscription':entry.kind,
+    message:quotaMessage,windows,metrics,notices,credits:null};
+}
+module.exports={query,modelMetrics,toolMetrics,grantMetrics};
+
+})(__provider_zai,__provider_zai.exports);
+const __provider_minimax={exports:{}}; (function(module,exports){
+/*
+ * Usage Dashboard
+ * Copyright (c) 2026 ItanBlackwell.
+ * SPDX-License-Identifier: MPL-2.0
+ * Source: https://github.com/ItanBlackwell/usage-dashboard
+ */
+'use strict';
+
+// The official Token Plan endpoint reports remaining counts. Do not use
+// the legacy coding-plan endpoint with its different count semantics.
+const M=__provider_metrics.exports;
+function parse(body,timestamp,measuredWindow){
+  if(body?.base_resp?.status_code!==undefined&&M.num(body.base_resp.status_code)!==0){
+    const code=M.num(body.base_resp.status_code);
+    throw Error([1004,2049,2057].includes(code)?'forbidden':code===2062?'missing_windows':'invalid_payload');
+  }
+  const rows=Array.isArray(body?.model_remains)?body.model_remains:[];
+  if(!rows.length)throw Error('missing_windows');
+  const byModel=new Map();
+  for(const row of rows.slice(0,80)){
+    const raw=row?.model_name??row?.model;
+    // Only display known public model names or fixed category names.
+    const model=M.safeModel(raw)||(['general','chat','text','image','video','speech','audio','search'].includes(String(raw).toLowerCase())?String(raw).toLowerCase():null);
+    if(!model)continue;
+    const windows=[];
+    for(const [prefix,label] of [['current_interval','5-hour'],['current_weekly','Weekly']]){
+      if(M.num(row[prefix+'_status'])===3)continue;
+      const total=M.num(row[prefix+'_total_count']),remaining=M.num(row[prefix+'_usage_count']);
+      const explicit=prefix==='current_weekly'?row.current_weekly_end_time??row.weekly_end_time:row.current_interval_end_time??row.end_time;
+      let win=total!==null&&total>0&&remaining!==null?measuredWindow(label,total,remaining,explicit):null;
+      const percent=M.num(row[prefix+'_remaining_percent']);
+      if(!win&&total!==0&&percent!==null&&percent>=0&&percent<=100)win={label,usedPercent:100-percent,remainingPercent:percent,resetsAt:timestamp(explicit)};
+      if(win)windows.push(win);
+    }
+    if(windows.length&&!byModel.has(model))byModel.set(model,windows);
+  }
+  const text=[...byModel].filter(([name])=>/^(?:general|chat|text)$|^minimax-m|^coding-plan/i.test(name));
+  // The main gauge describes text/chat limits only; no video pool is used
+  // as a substitute for the absence of a text allowance.
+  const windows=[];
+  for(const label of ['5-hour','Weekly']){
+    const candidates=text.flatMap(([,wins])=>wins.filter(w=>w.label===label));
+    if(candidates.length)windows.push(candidates.reduce((x,y)=>y.remainingPercent<x.remainingPercent?y:x));
+  }
+  const modelWindows=[...byModel].flatMap(([model,wins])=>wins.map(w=>({...w,model}))).slice(0,40);
+  if(!windows.length&&!modelWindows.length)throw Error('missing_windows');
+  return {windows,modelWindows,credits:null,notices:[{group:'balance',status:'unsupported'},
+    ...(!windows.length?[{group:'quota',status:'missing_windows'}]:[])]};
+}
+module.exports={parse};
+
+})(__provider_minimax,__provider_minimax.exports);
 const __accounts={exports:{}}; (function(module,exports){
 /*
  * Usage Dashboard
@@ -270,6 +646,11 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const base = __old.exports;
+const metrics = __provider_metrics.exports;
+const claudeApi = __provider_claude.exports;
+const kimiExtras = __provider_kimi.exports;
+const zaiApi = __provider_zai.exports;
+const minimaxApi = __provider_minimax.exports;
 
 // Only explicit, first-party integration IDs are accepted. Generic OpenAI-compatible
 // gateways MUST NOT be treated as any provider or receive its credentials.
@@ -485,19 +866,51 @@ function parseDeepSeekBalances(body) {
   return found.sort((a,b)=>Number(b.currency==='USD')-Number(a.currency==='USD'));
 }
 function parseDeepSeekBalance(body){return parseDeepSeekBalances(body)[0];}
+function deepSeekDetails(body){
+  const rows=[];
+  for(const v of body.balance_infos){
+    if(!['USD','CNY'].includes(v?.currency))continue;
+    for(const [field,code] of [['topped_up_balance','topped_up'],['granted_balance','granted']]){
+      const m=metrics.metric(code,v[field],{currency:v.currency});if(m)rows.push(m);
+    }
+  }
+  return {metrics:rows,notices:[{group:'budget',status:'unsupported'},{group:'usage',status:'unsupported'},
+    ...(rows.length<2*body.balance_infos.filter(v=>['USD','CNY'].includes(v?.currency)).length?[{group:'breakdown',status:'not_returned'}]:[]),
+    ...(body.is_available===false?[{group:'balance',status:'insufficient_balance'}]:[])]};
+}
 function parseKimiBalance(body,currency='USD') {
   // Moonshot v1 returns a business success indicator and may include a numeric
   // 'code' field. 0 is required when it is present; some older versions omit it.
   if(body?.status!==true || (body.code!==undefined && body.code!==0)) throw new Error('invalid_payload');
   return validBalance(body?.data?.available_balance,currency);
 }
-function parseOpenRouterKey(body) {
+function kimiDetails(body,currency){
+  const rows=[metrics.metric('cash',body?.data?.cash_balance,{currency}),metrics.metric('voucher',body?.data?.voucher_balance,{currency})].filter(Boolean);
+  return {metrics:rows,notices:[{group:'budget',status:'unsupported'},{group:'usage',status:'unsupported'},
+    ...(rows.length<2?[{group:'breakdown',status:'not_returned'}]:[])]};
+}
+function parseOpenRouterKey(body,now=Date.now()) {
   const v=object(body?.data);
   if(!v) throw new Error('invalid_payload');
-  const left=number(v.limit_remaining),limit=number(v.limit);
-  // A key spending cap is NEVER a prepaid wallet balance.
-  return {management:v.is_management_key===true,
-    limit:left!==null && limit!==null && limit>=0?validBalance(left,'USD','key_limit'):null};
+  const remaining=metrics.num(v.limit_remaining),limit=metrics.nonnegative(v.limit);
+  const left=remaining!==null&&Math.abs(remaining)<=1e12?Math.max(0,remaining):null;
+  const period=['daily','weekly','monthly'].includes(v.limit_reset)?v.limit_reset:v.limit_reset===null?'none':null;
+  let resetsAt=null;
+  if(period&&period!=='none'){
+    const d=new Date(now),today=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate());
+    if(period==='daily')resetsAt=today+86400000;
+    if(period==='weekly')resetsAt=today+(7-(d.getUTCDay()+6)%7)*86400000;
+    if(period==='monthly')resetsAt=Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1);
+  }
+  const expiresAt=typeof v.expires_at==='string'?Date.parse(v.expires_at):null;
+  const keyBudget=metrics.cleanKeyBudget({limit,remaining:limit===null?null:left,period,resetsAt,expiresAt,includeByok:v.include_byok_in_limit,freeTier:v.is_free_tier});
+  const rows=[];
+  for(const [field,code] of [['usage_daily','key_daily'],['usage_weekly','key_weekly'],['usage_monthly','key_monthly'],['usage','key_total'],
+    ['byok_usage_daily','byok_daily'],['byok_usage_weekly','byok_weekly'],['byok_usage_monthly','byok_monthly'],['byok_usage','byok_total']]){
+    const m=metrics.metric(code,v[field],{currency:'USD'});if(m)rows.push(m);
+  }
+  return {management:v.is_management_key===true,keyBudget,metrics:rows,
+    limit:left!==null&&limit!==null?validBalance(left,'USD','key_limit'):null};
 }
 function parseOpenRouterCredits(body) {
   const v=object(body?.data),credits=number(v?.total_credits),spent=number(v?.total_usage);
@@ -511,33 +924,42 @@ const measuredWindow=(label,limit,remaining,resetsAt)=>{
   return {label,usedPercent:100-pct,remainingPercent:pct,resetsAt:timestamp(resetsAt)};
 };
 function parseKimiCoding(body) {
+  if(!object(body)||body.code!==undefined&&body.code!==0||body?.data?.kind==='error')throw Error('invalid_payload');
   const windows=[];
-  const total=measuredWindow('Weekly',body?.usage?.limit,body?.usage?.remaining,body?.usage?.resetTime);
+  const counter=(label,item)=>{
+    const limit=number(item?.limit),used=number(item?.used);
+    const left=number(item?.remaining)??(limit!==null&&used!==null&&used>=0?Math.max(0,limit-used):null);
+    return measuredWindow(label,limit,left,item?.resetTime);
+  };
+  const total=counter('Weekly',body?.usage);
   if(total)windows.push(total);
   for(const item of Array.isArray(body?.limits)?body.limits:[]){
     const w=item?.window||{};
     const duration=number(w.duration);
     if(!((w.timeUnit==='TIME_UNIT_MINUTE'&&duration===300)||(w.timeUnit==='TIME_UNIT_HOUR'&&duration===5)))continue;
-    const win=measuredWindow('5-hour',item?.detail?.limit,item?.detail?.remaining,item?.detail?.resetTime);
+    const win=counter('5-hour',item?.detail);
     if(win)windows.push(win);
   }
-  if(!windows.length)throw new Error('missing_windows');
-  return {windows,credits:null};
+  const extended=kimiExtras.parseExtras(body,windows,timestamp);
+  if(!extended.windows.length&&!extended.metrics.length)throw new Error('missing_windows');
+  return {credits:null,...extended};
 }
 function parseZaiQuota(body){
-  if(!Array.isArray(body?.data?.limits)) throw new Error('missing_windows');
+  if(body?.success===false||!Array.isArray(body?.data?.limits)) throw new Error('missing_windows');
   const windows=[];
   for(const item of body.data.limits){
-    if(item?.type!=='TOKENS_LIMIT')continue;
+    if(!['TOKENS_LIMIT','CREDIT_LIMIT','TIME_LIMIT'].includes(item?.type))continue;
     const unit=number(item.unit),duration=number(item.number);
     let label;
-    if(unit===3&&duration===5)label='5-hour';
-    if(unit===6&&duration===1)label='Weekly';
+    if(item.type==='TIME_LIMIT'&&unit===5&&duration===1)label='Monthly · MCP';
+    if(item.type!=='TIME_LIMIT'&&unit===3&&duration===5)label='5-hour';
+    if(item.type!=='TIME_LIMIT'&&unit===6&&duration===1)label='Weekly';
     if(!label)continue;
     // The field 'usage' denotes total available credits, not usage consumed.
-    const left=number(item.remaining),total=number(item.usage);
+    const total=number(item.usage),current=number(item.currentValue);
+    const left=number(item.remaining)??(total!==null&&current!==null&&current>=0?Math.max(0,total-current):null);
     let win=measuredWindow(label,total,left,item.nextResetTime);
-    if(!win){
+    if(!win&&total!==0){
       const used=number(item.percentage);
       if(used!==null&&used>=0&&used<=100)win={label,usedPercent:used,remainingPercent:100-used,resetsAt:timestamp(item.nextResetTime)};
     }
@@ -546,33 +968,7 @@ function parseZaiQuota(body){
   if(!windows.length)throw new Error('missing_windows');
   return {windows,credits:null};
 }
-function parseMiniMaxQuota(body){
-  if(number(body?.base_resp?.status_code)!==null && number(body.base_resp.status_code)!==0)throw new Error('quota_unavailable');
-  const rows=Array.isArray(body?.model_remains)?body.model_remains:[];
-  if(!rows.length)throw new Error('missing_windows');
-  // Prefer text/chat pools. A video-only row may report 100% remaining when
-  // its total is 0, even though video generation is unavailable.
-  const sorted=[...rows].sort((a,b)=>{
-    const score=x=>/^(?:general|chat|text)$|minimax-m/i.test(String(x?.model_name||x?.model||''))?0:1;
-    return score(a)-score(b);
-  });
-  const selected=sorted[0];
-  const windows=[];
-  for(const [prefix,label] of [['current_interval','5-hour'],['current_weekly','Weekly']]){
-    const total=number(selected?.[`${prefix}_total_count`]);
-    // When total=0, 100% from the API cannot be trusted as an allowance.
-    if(total===0)continue;
-    const percent=number(selected?.[`${prefix}_remaining_percent`]);
-    const left=number(selected?.[`${prefix}_usage_count`]); // Token Plan endpoint: REMAINING, not spent.
-    let win=total!==null&&total>0&&left!==null?measuredWindow(label,total,left,selected?.end_time):null;
-    if(!win&&percent!==null&&percent>=0&&percent<=100){
-      win={label,usedPercent:100-percent,remainingPercent:percent,resetsAt:timestamp(selected?.end_time)};
-    }
-    if(win)windows.push(win);
-  }
-  if(!windows.length)throw new Error('missing_windows');
-  return {windows,credits:null};
-}
+function parseMiniMaxQuota(body){return minimaxApi.parse(body,timestamp,measuredWindow);}
 function parseOpenCodeGoUsage(body) {
   const windows = [];
   for (const [key,label] of [['rolling','5-hour'],['weekly','Weekly'],['monthly','Monthly']]) {
@@ -666,10 +1062,10 @@ async function queryOpenCodeConsole(entry,fetcher){
 }
 // Never send a stored provider token to user-supplied URLs, gateways, mirrors or
 // a different provider's hostname. The mapping here is deliberately fixed.
-async function queryAdditional(entry,fetcher){
+async function queryAdditional(entry,fetcher,time=nowMs()){
   if(entry.provider==='opencode')return queryOpenCodeConsole(entry,fetcher);
   if(['gemini','qwen'].includes(entry.provider))
-    return {state:'unavailable',message:'no_usage_endpoint'};
+    return {state:'unavailable',message:'no_usage_endpoint',notices:['balance','budget','usage'].map(group=>({group,status:'unsupported'}))};
   const key=entry.apiKey || entry.access;
   if(!key)return {state:'unavailable',message:'credential_not_readable'};
   const headers={Authorization:`Bearer ${key}`,Accept:'application/json'};
@@ -681,7 +1077,7 @@ async function queryAdditional(entry,fetcher){
   if(entry.provider==='deepseek'){
     const value=await fetchSafe('https://api.deepseek.com/user/balance',headers,fetcher);
     const balances=parseDeepSeekBalances(value);
-    return {state:'ok',message:'ok',balance:balances[0],balances};
+    return {state:'ok',message:'ok',balance:balances[0],balances,...deepSeekDetails(value)};
   }
   if(entry.provider==='kimi'){
     if(isCodingPlan(entry.integrationID)){
@@ -690,45 +1086,57 @@ async function queryAdditional(entry,fetcher){
     }
     const cn=/(?:-cn)$/.test(entry.integrationID);
     const value=await fetchSafe(cn?'https://api.moonshot.cn/v1/users/me/balance':'https://api.moonshot.ai/v1/users/me/balance',headers,fetcher);
-    return {state:'ok',message:'ok',balance:parseKimiBalance(value,cn?'CNY':'USD')};
+    const currency=cn?'CNY':'USD';
+    return {state:'ok',message:'ok',balance:parseKimiBalance(value,currency),...kimiDetails(value,currency)};
   }
   if(entry.provider==='openrouter'){
-    const info=parseOpenRouterKey(await fetchSafe('https://openrouter.ai/api/v1/key',headers,fetcher));
+    const info=parseOpenRouterKey(await fetchSafe('https://openrouter.ai/api/v1/key',headers,fetcher),time);
+    const rows=[...info.metrics],notices=[];
+    let wallet=null;
     if(info.management){
-      const value=await fetchSafe('https://openrouter.ai/api/v1/credits',headers,fetcher);
-      return {state:'ok',message:'ok',balance:parseOpenRouterCredits(value)};
-    }
-    return {state:'ok',message:info.limit?'key_limit_only':'no_balance_access',balance:info.limit};
+      try{
+        const value=await fetchSafe('https://openrouter.ai/api/v1/credits',headers,fetcher);
+        wallet=parseOpenRouterCredits(value);
+        for(const [field,code] of [['total_credits','wallet_total_credits'],['total_usage','wallet_total_usage']]){
+          const m=metrics.metric(code,value?.data?.[field],{currency:'USD'});if(m)rows.push(m);
+        }
+      }catch(e){notices.push({group:'balance',status:metrics.reason(e)});}
+    }else notices.push({group:'balance',status:'no_balance_access'});
+    if(info.keyBudget.limit===null)notices.push({group:'budget',status:'no_limit'});
+    else if(info.keyBudget.remaining===null)notices.push({group:'budget',status:'not_returned'});
+    if(!info.metrics.length)notices.push({group:'usage',status:'not_returned'});
+    return {state:'ok',message:wallet?'ok':info.limit?'key_limit_only':'no_balance_access',
+      balance:wallet||info.limit,keyBudget:info.keyBudget,metrics:rows,notices};
   }
   if(entry.provider==='minimax'){
     // Some MiniMax Subscription Keys are connected under the general MiniMax ID.
     // Only a recognisable subscription key may use the Token Plan endpoint.
     if(!isCodingPlan(entry.integrationID) && !String(entry.apiKey||'').startsWith('sk-cp-'))
-      return {state:'unavailable',message:'no_usage_endpoint'};
+      return {state:'unavailable',message:'no_usage_endpoint',notices:['balance','budget','usage'].map(group=>({group,status:'unsupported'}))};
     const cn=/(?:-cn)(?:-|$)/.test(entry.integrationID);
     const value=await fetchSafe(cn?'https://www.minimaxi.com/v1/token_plan/remains':'https://www.minimax.io/v1/token_plan/remains',headers,fetcher);
     return {state:'ok',message:'ok',kind:'subscription',...parseMiniMaxQuota(value)};
   }
-  if(entry.provider==='zai'){
-    // Experimental, undocumented Coding Plan endpoint. It must fail closed,
-    // without inventing a quota from an ordinary OpenAI-compatible API key.
-    const cn=entry.integrationID.startsWith('zhipuai') || entry.integrationID==='zai-cn-coding-plan';
-    const value=await fetchSafe(cn?'https://open.bigmodel.cn/api/monitor/usage/quota/limit':'https://api.z.ai/api/monitor/usage/quota/limit',headers,fetcher);
-    return {state:'ok',message:'experimental_quota',kind:'subscription',...parseZaiQuota(value)};
-  }
-  return {state:'unavailable',message:'no_usage_endpoint'};
+  if(entry.provider==='zai')return zaiApi.query(entry,fetchSafe,fetcher,time,parseZaiQuota);
+  return {state:'unavailable',message:'no_usage_endpoint',notices:['balance','budget','usage'].map(group=>({group,status:'unsupported'}))};
 }
 async function queryQuota(entry, fetcher = fetch, time = nowMs()) {
   const safe = { id: entry.id, provider: entry.provider, kind: entry.kind, label: entry.label,
     source: entry.source, active: entry.active, state:'unavailable', message:'quota_unavailable',
-    windows:[], credits:null, balance:null, balances:[], budgets:[],budgetMessage:null,checkedAt:time };
+    windows:[], credits:null, balance:null, balances:[], budgets:[],budgetMessage:null,
+    metrics:[],notices:[],keyBudget:null,modelWindows:[],checkedAt:time };
   if (!['codex','claude'].includes(entry.provider)) {
     if (entry.needsAuth) return {...safe,message:'login_required',budgetMessage:entry.provider==='opencode'?'login_required':null};
-    try{return {...safe,...await queryAdditional(entry,fetcher)};}
+    if(entry.tokenMethod==='oauth'&&entry.expires&&entry.expires<time+10000)
+      return {...safe,message:'login_expired'};
+    try{return {...safe,...await queryAdditional(entry,fetcher,time)};}
     catch(e){return {...safe,state:'error',message:errorReason(e)};}
   }
-  if (entry.kind !== 'subscription') return { ...safe, message:entry.provider==='codex'?'no_usage_endpoint':'api_key_connected' };
   if (entry.needsAuth) return { ...safe, message:'login_required' };
+  if (entry.kind !== 'subscription'){
+    if(entry.provider==='claude')return {...safe,...await claudeApi.query(entry,fetchSafe,fetcher,time)};
+    return {...safe,message:'no_usage_endpoint',notices:[{group:'balance',status:'unsupported'},{group:'budget',status:'unsupported'},{group:'usage',status:'unsupported'}]};
+  }
   if (!entry.access) return { ...safe, message:'oauth_not_readable' };
   // The current 'Sign in with ChatGPT' token-sharing credential is scoped to
   // api.openai.com/v1, not the Codex wham/usage endpoint. A request to wham
@@ -1008,6 +1416,7 @@ const __cache={exports:{}}; (function(module,exports){
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const providerMetrics = __provider_metrics.exports;
 
 const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0});
 const BUDGET_MESSAGES=new Set(['experimental_budget','no_budgets','unauthorized','forbidden','rate_limited','request_failed','invalid_payload','invalid_balance','unsupported_console','workspace_required','credential_not_readable','login_expired','login_required','plugin_ipc_unavailable']);
@@ -1025,6 +1434,15 @@ const readInterval = (value, fallback=5) => Number.isInteger(value) && value>=1 
 function cacheDirectory(env=process.env,home=os.homedir()) {
   return path.join(env.LOCALAPPDATA || path.join(home,'.cache'), 'usage-dashboard');
 }
+function cleanWindows(rows,models=false){
+  if(!Array.isArray(rows))return [];
+  return rows.slice(0,models?40:20).filter(w=>w&&typeof w.label==='string'&&
+    typeof w.usedPercent==='number'&&Number.isFinite(w.usedPercent)&&w.usedPercent>=0&&w.usedPercent<=100&&
+    typeof w.remainingPercent==='number'&&Number.isFinite(w.remainingPercent)&&w.remainingPercent>=0&&w.remainingPercent<=100&&
+    (!models||providerMetrics.safeModel(w.model)||['general','chat','text','image','video','speech','audio','search'].includes(w.model)))
+    .map(w=>({label:w.label.slice(0,40),usedPercent:w.usedPercent,remainingPercent:w.remainingPercent,
+      resetsAt:Number.isFinite(w.resetsAt)&&w.resetsAt>0?w.resetsAt:null,...(models?{model:w.model}:{})}));
+}
 function sanitizeSnapshot(value) {
   const result = EMPTY();
   if (!value || typeof value !== 'object') return result;
@@ -1041,13 +1459,12 @@ function sanitizeSnapshot(value) {
     balances:Array.isArray(a.balances)?a.balances.slice(0,2).filter(b=>b && b.kind==='balance'
       && ['USD','CNY'].includes(b.currency) && typeof b.amount==='number' && Number.isFinite(b.amount))
       .map(b=>({amount:b.amount,currency:b.currency,kind:'balance'})):[],
-    windows:Array.isArray(a.windows)?a.windows.slice(0,10).map(w=>({
-      label:String(w.label||'').slice(0,40), usedPercent:Number(w.usedPercent)||0,
-      remainingPercent:Number(w.remainingPercent)||0,
-      resetsAt:Number.isFinite(w.resetsAt)?w.resetsAt:null,
-    })):[],credits:Number.isFinite(a.credits)?a.credits:null,
+    windows:cleanWindows(a.windows),credits:Number.isFinite(a.credits)?a.credits:null,
     budgets:a.provider==='opencode'&&a.kind==='api'?sanitizeBudgets(a.budgets):[],
     budgetMessage:a.provider==='opencode'&&BUDGET_MESSAGES.has(a.budgetMessage)?a.budgetMessage:null,
+    metrics:providerMetrics.cleanMetrics(a.metrics),notices:providerMetrics.cleanNotices(a.notices),
+    keyBudget:a.provider==='openrouter'?providerMetrics.cleanKeyBudget(a.keyBudget):null,
+    modelWindows:a.provider==='minimax'?cleanWindows(a.modelWindows,true):[],
     checkedAt:Number.isFinite(a.checkedAt)?a.checkedAt:0,
   }));
   if (Array.isArray(value.organizations)) result.organizations=value.organizations.slice(0,16).map(o=>({
@@ -1101,11 +1518,13 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           ? previous.accounts.map(a=>({...a,state:'stale'}))
           : nextAccounts.map(a=>{
             const prev=prevById.get(a.id);
-            if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length)
-              return {...prev,state:'stale'};
+            if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length&&
+              prev.provider===a.provider&&prev.kind===a.kind&&
+              ['request_failed','rate_limited','invalid_payload','missing_windows','missing_rate_limits'].includes(a.message))
+              return {...a,windows:prev.windows,modelWindows:prev.modelWindows,credits:prev.credits,checkedAt:prev.checkedAt,state:'stale'};
             // Do not resurrect a Console balance from a different workspace
             // or a previous permission grant after its current read failed.
-            if(a.provider!=='opencode' && a.state==='error' && !a.balance && prev?.balance &&
+            if(a.provider!=='opencode' && a.provider!=='openrouter' && a.state==='error' && !a.balance && prev?.balance &&
               prev.provider===a.provider && prev.kind===a.kind &&
               ['request_failed','rate_limited','invalid_payload','invalid_balance'].includes(a.message))
               return {...a,balance:prev.balance,balances:prev.balances,checkedAt:prev.checkedAt,state:'stale'};
@@ -1276,10 +1695,11 @@ function mergeInventoryFallback(inventory,previous) {
   const accounts=current.map(a=>{
     const p=byId.get(a.id);
     if(!p||p.provider!==a.provider||p.kind!==a.kind||p.source!==a.source||p.message==='login_required')return a;
-    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits)||(p.budgets||[]).length;
+    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits)||(p.budgets||[]).length||(p.metrics||[]).length||(p.modelWindows||[]).length||p.keyBudget;
     if(!known)return a;
     return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
       credits:p.credits,budgets:(p.budgets||[]).filter(b=>b.resetsAt>Date.now()),
+      metrics:p.metrics||[],notices:p.notices||[],modelWindows:p.modelWindows||[],keyBudget:p.keyBudget||null,
       budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
       checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
@@ -1294,9 +1714,13 @@ function indicatorPresentation(account,snapshot) {
   if(!account)return {mode:'unavailable'};
   if(account.kind==='api'){
     const own=account.balance;
-    // A key spending cap is NOT wallet money. Keep the ring unknown instead of
-    // misrepresenting it as a prepaid balance.
+    // An actual wallet balance takes priority over a separately marked cap.
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
+    // A key cap is separately marked as a budget, not a wallet.
+    if(own?.kind==='key_limit'&&Number.isFinite(own.amount)&&account.keyBudget&&
+      (!account.keyBudget.resetsAt||account.keyBudget.resetsAt>Date.now())&&
+      (!account.keyBudget?.expiresAt||account.keyBudget.expiresAt>Date.now()))
+      return {mode:'api',amount:own.amount,currency:own.currency,metric:'budget'};
     const budget=tightestGeneralBudget(account);
     if(budget)return {mode:'api',amount:budget.remainingUsd,currency:'USD',metric:'budget'};
     return {mode:'api',amount:null,currency:'USD'};
@@ -1503,17 +1927,22 @@ const WindowSchema = Schema.Struct({ label:Schema.String, usedPercent:Schema.Num
   remainingPercent:Schema.Number, resetsAt:Schema.NullOr(Schema.Number) });
 const BudgetSchema = Schema.Struct({limitUsd:Schema.Number,spentUsd:Schema.NullOr(Schema.Number),remainingUsd:Schema.NullOr(Schema.Number),
   resetsAt:Schema.Number,scope:Schema.String,coverage:Schema.String,per:Schema.String,shared:Schema.Boolean});
+const DetailSchema=Schema.Struct({code:Schema.String,value:Schema.Number,currency:Schema.NullOr(Schema.String),model:Schema.NullOr(Schema.String),at:Schema.NullOr(Schema.Number)});
+const NoticeSchema=Schema.Struct({group:Schema.String,status:Schema.String});
+const KeyBudgetSchema=Schema.Struct({limit:Schema.NullOr(Schema.Number),remaining:Schema.NullOr(Schema.Number),period:Schema.NullOr(Schema.String),resetsAt:Schema.NullOr(Schema.Number),expiresAt:Schema.NullOr(Schema.Number),includeByok:Schema.NullOr(Schema.Boolean),freeTier:Schema.NullOr(Schema.Boolean)});
+const ModelWindowSchema=Schema.Struct({label:Schema.String,model:Schema.String,usedPercent:Schema.Number,remainingPercent:Schema.Number,resetsAt:Schema.NullOr(Schema.Number)});
 const AccountSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,kind:Schema.String,
   label:Schema.String,source:Schema.String,active:Schema.Boolean,state:Schema.String,message:Schema.String,
   windows:Schema.Array(WindowSchema),credits:Schema.NullOr(Schema.Number),balance:Schema.NullOr(ProviderBalanceSchema),balances:Schema.Array(ProviderBalanceSchema),
-  budgets:Schema.Array(BudgetSchema),budgetMessage:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+  budgets:Schema.Array(BudgetSchema),budgetMessage:Schema.NullOr(Schema.String),
+  metrics:Schema.Array(DetailSchema),notices:Schema.Array(NoticeSchema),keyBudget:Schema.NullOr(KeyBudgetSchema),modelWindows:Schema.Array(ModelWindowSchema),checkedAt:Schema.Number });
 const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:Schema.String,
   month:Schema.String,state:Schema.String,message:Schema.String,usdSpent:Schema.NullOr(Schema.Number),
   monthlyBudgetUsd:Schema.NullOr(Schema.Number),usdRemainingBudget:Schema.NullOr(Schema.Number),
   limitType:Schema.String,checkedAt:Schema.Number });
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
   inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v4',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v5',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -1532,6 +1961,7 @@ const money = value => currencyAmount(value,'USD');
 const snapshotListeners = new Set();
 // Per-desktop-window first-seen order survives closing and reopening the popup.
 const stableAccountOrder = new Map();
+const expandedAccountDetails=new Set();
 // Only an unconfirmed request may override active flags received from main.
 const visualIntents = new Map();
 let latestSelectedID=null;
@@ -1673,6 +2103,116 @@ function accountHeader(ctx,card,account,onSwitch,switchingID,api=false,summary=n
     b.addEventListener('click',()=>onSwitch(account.id));
   }
 }
+function renderProviderDetails(ctx,card,account){
+  const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru'),tr=(en,rus)=>ru?rus:en;
+  const labels={
+    topped_up:tr('Top-up funds','Пополнения'),granted:tr('Granted funds','Бонусы'),cash:tr('Cash balance','Денежные средства'),voucher:tr('Vouchers','Ваучеры'),
+    key_daily:tr('Key spend · today','Расход ключа · сегодня'),key_weekly:tr('Key spend · week','Расход ключа · неделя'),
+    key_monthly:tr('Key spend · month','Расход ключа · месяц'),key_total:tr('Key spend · total','Расход ключа · всего'),
+    byok_daily:tr('BYOK · today','BYOK · сегодня'),byok_weekly:tr('BYOK · week','BYOK · неделя'),byok_monthly:tr('BYOK · month','BYOK · месяц'),byok_total:tr('BYOK · total','BYOK · всего'),
+    wallet_total_credits:tr('Wallet credits · total','Кредиты кошелька · всего'),wallet_total_usage:tr('Wallet spend · total','Расход кошелька · всего'),
+    org_month_cost:tr('Organization spend · month (UTC)','Расход организации · месяц (UTC)'),org_model_cost:tr('Organization cost','Расход организации'),
+    org_month_tokens:tr('Organization tokens · month (UTC)','Токены организации · месяц (UTC)'),org_month_requests:tr('Organization requests · month (UTC)','Запросы организации · месяц (UTC)'),
+    org_model_tokens:tr('Organization tokens','Токены организации'),org_model_requests:tr('Organization requests','Запросы организации'),
+    extra_balance:tr('Extra Usage balance','Остаток Extra Usage'),extra_total:tr('Extra Usage total','Extra Usage · всего'),
+    extra_month_used:tr('Extra Usage spend · month','Extra Usage · расход за месяц'),extra_month_limit:tr('Extra Usage monthly cap','Extra Usage · месячный лимит'),
+    tokens_24h:tr('Tokens · 24h (monitor)','Токены · 24 ч (мониторинг)'),requests_24h:tr('Requests · 24h','Запросы · 24 ч'),
+    model_tokens_24h:tr('Tokens · 24h','Токены · 24 ч'),model_requests_24h:tr('Requests · 24h','Запросы · 24 ч'),
+    search_24h:tr('Web searches · 24h','Веб-поиск · 24 ч'),web_read_24h:tr('Web reads · 24h','Чтение веб · 24 ч'),zread_24h:tr('ZRead · 24h','ZRead · 24 ч'),
+    tool_calls_24h:tr('Search MCP · 24h','Поиск MCP · 24 ч'),grant_remaining:tr('Grant remaining','Остаток выделенных кредитов'),grant_used:tr('Grant used','Использовано кредитов'),plan_parallel:tr('Parallel requests','Параллельные запросы')
+  };
+  const groups={balance:tr('Balance','Баланс'),budget:tr('Budget','Бюджет'),usage:tr('Usage','Статистика'),cost:tr('Cost','Расходы'),tokens:tr('Tokens','Токены'),
+    extra:'Extra Usage',tools:tr('Tools','Инструменты'),grants:tr('Credit grants','Выделенные кредиты'),breakdown:tr('Breakdown','Детализация'),quota:tr('Quota','Лимиты')};
+  const reasons={
+    unsupported:tr('not supported with existing connection','не поддерживается с текущим подключением'),
+    no_usage_endpoint:tr('no supported endpoint','нет поддерживаемого API'),
+    no_balance_access:tr('wallet access not granted','нет доступа к кошельку'),
+    no_prepaid_balance:tr('no prepaid wallet','нет предоплаченного кошелька'),
+    no_limit:tr('no configured cap returned','лимит не задан или не возвращён'),
+    no_budgets:tr('no applicable budgets returned','нет доступных бюджетов'),
+    not_returned:tr('not returned by provider','не возвращается провайдером'),
+    unauthorized:tr('authorization rejected (401)','авторизация отклонена (401)'),
+    forbidden:tr('access denied (403)','нет прав доступа (403)'),
+    rate_limited:tr('request rate limited (429)','ограничена частота (429)'),
+    request_failed:tr('request failed or timed out','ошибка или таймаут запроса'),
+    invalid_payload:tr('unsupported response format','неподдерживаемый формат ответа'),
+    invalid_balance:tr('invalid balance response','некорректный баланс'),
+    missing_windows:tr('no usable quota returned','нет доступных лимитов'),
+    missing_rate_limits:tr('no usable quota returned','нет доступных лимитов'),
+    quota_unavailable:tr('unavailable','недоступны'),
+    sharing_no_usage_api:tr('this sign-in method does not expose quotas','этот способ входа не предоставляет лимиты'),
+    oauth_not_readable:tr('credential unavailable','учётные данные недоступны'),
+    credential_not_readable:tr('credential unavailable','учётные данные недоступны'),
+    login_expired:tr('login expired','срок входа истёк'),
+    workspace_required:tr('workspace missing','workspace не указан'),
+    unsupported_console:tr('unsupported Console origin','неподдерживаемый адрес Console'),
+    plugin_ipc_unavailable:tr('plugin service unavailable','служба плагина недоступна'),
+    insufficient_balance:tr('provider reports insufficient funds','провайдер сообщает о недостатке средств'),
+    experimental:tr('experimental','экспериментально'),
+    stale:tr('last known reading','последние известные данные')
+  };
+  const rows=account.metrics||[],notices=[...(account.notices||[])];
+  const hasBalance=account.balance?.kind==='balance'&&Number.isFinite(account.balance.amount);
+  const hasKey=account.keyBudget&&Number.isFinite(account.keyBudget.limit);
+  if(account.kind==='api'){
+    if(!hasBalance&&!notices.some(n=>n.group==='balance'))notices.push({group:'balance',status:account.message==='no_usage_endpoint'||account.message==='api_key_connected'?'unsupported':account.message==='key_limit_only'?'no_balance_access':account.message});
+    if(account.provider!=='opencode'&&!hasKey&&!notices.some(n=>n.group==='budget')){
+      const status=account.provider==='openrouter'&&account.state!=='ok'?account.message:'unsupported';
+      notices.push({group:'budget',status});
+    }
+    if(!rows.length&&!['opencode','claude','deepseek','kimi','openrouter','zai'].includes(account.provider)&&!notices.some(n=>n.group==='usage'))notices.push({group:'usage',status:'unsupported'});
+  }else if(!account.windows?.length&&!account.modelWindows?.length&&!notices.some(n=>n.group==='quota'))notices.push({group:'quota',status:account.message});
+  if(account.state==='stale')notices.unshift({group:'usage',status:'stale'});
+  const style='font-size:9.5px;line-height:1.25;color:'+palette.muted;
+  const list=add(card,$('div','display:flex;flex-direction:column;gap:2px;min-width:0;margin-top:3px'));
+  const row=(parent,label,value,tip='')=>{
+    const r=add(parent,$('div','display:flex;align-items:baseline;justify-content:space-between;gap:5px;min-width:0;'+style));
+    const name=add(r,$('span','min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',label));
+    add(r,$('span','flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums',value));r.title=tip||label;name.title=r.title;
+  };
+  const date=v=>{try{return Number.isFinite(v)?new Intl.DateTimeFormat(ru?'ru-RU':undefined,{dateStyle:'short',timeStyle:'short'}).format(new Date(v)):'—';}catch{return '—';}};
+  if(account.keyBudget){
+    const k=account.keyBudget,expired=k.expiresAt&&k.expiresAt<=Date.now(),reset=k.resetsAt&&k.resetsAt<=Date.now();
+    if(Number.isFinite(k.limit)){
+      const period={daily:tr('daily','день'),weekly:tr('weekly','неделя'),monthly:tr('monthly','месяц'),none:tr('no reset','без сброса')}[k.period]||'—';
+      row(list,tr('Key cap','Бюджет ключа')+' · '+period,money(expired||reset?null:k.remaining)+' / '+money(k.limit),
+        tr('Key spending cap, not wallet money','Лимит расходов ключа, не баланс')+'\n'+tr('Resets: ','Сброс: ')+date(k.resetsAt));
+    }
+    if(Number.isFinite(k.expiresAt))row(list,tr('Key expires','Ключ истекает'),date(k.expiresAt));
+  }
+  const renderMetric=(parent,m)=>{
+    const label=labels[m.code];if(!label)return;
+    const expired=m.code.startsWith('grant_')&&m.at&&m.at<=Date.now();
+    const amount=expired?'—':m.currency?currencyAmount(m.value,m.currency):Number(m.value).toLocaleString(ru?'ru-RU':'en-US');
+    const timeLabel=m.code.startsWith('org_')?tr('Data refreshed: ','Данные обновлены: '):tr('Expires: ','Истекает: ');
+    row(parent,label+(m.model?' · '+m.model:''),amount,m.at?timeLabel+date(m.at):'');
+  };
+  const primary=new Set(['topped_up','granted','cash','voucher','key_monthly','org_month_cost','org_month_tokens','extra_balance','tokens_24h']);
+  for(const m of rows.filter(m=>primary.has(m.code)))renderMetric(list,m);
+  const rest=rows.filter(m=>!primary.has(m.code)),models=account.modelWindows||[];
+  if(rest.length||models.length||account.keyBudget?.includeByok!==null&&account.keyBudget?.includeByok!==undefined||account.keyBudget?.freeTier!==null&&account.keyBudget?.freeTier!==undefined){
+    const details=add(list,$('details','min-width:0;'+style));details.open=expandedAccountDetails.has(account.id);
+    const summary=add(details,$('summary','cursor:pointer;white-space:nowrap',tr('More metrics','Подробнее')));
+    details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(account.id);else expandedAccountDetails.delete(account.id);});
+    const box=add(details,$('div','display:flex;flex-direction:column;gap:2px;padding-top:2px'));
+    if(typeof account.keyBudget?.includeByok==='boolean')row(box,tr('BYOK included in cap','BYOK учитывается в лимите'),account.keyBudget.includeByok?tr('Yes','Да'):tr('No','Нет'));
+    if(typeof account.keyBudget?.freeTier==='boolean')row(box,tr('Free tier','Бесплатный тариф'),account.keyBudget.freeTier?tr('Yes','Да'):tr('No','Нет'));
+    for(const m of rest)renderMetric(box,m);
+    for(const w of models)row(box,w.model+' · '+displayWindow(ctx,w.label),pct(w.remainingPercent),tr('Resets: ','Сброс: ')+date(w.resetsAt));
+  }
+  // Combine equal reasons into a compact, visible line. Keep different
+  // failures separate so a missing wallet never hides a working quota.
+  const grouped=new Map();
+  for(const n of notices){
+    if(!groups[n.group]||!reasons[n.status])continue;
+    const names=grouped.get(n.status)||new Set();names.add(groups[n.group]);grouped.set(n.status,names);
+  }
+  for(const [status,names] of grouped){
+    const line=add(list,$('span',style,[...names].join(' / ')+': '+reasons[status]));
+    line.setAttribute('data-pv-metric-notice',status);
+  }
+  if(!list.childNodes.length)list.remove();
+}
 function renderConsoleBudgets(ctx,card,account){
   if(account.provider!=='opencode')return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
@@ -1764,12 +2304,14 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
       try{footerItems.push(`◷ ${new Intl.DateTimeFormat(lang,{dateStyle:'short',timeStyle:'short'}).format(new Date(account.checkedAt))}`);}catch{}
     }
     if(footerItems.length)add(card,$('div',`color:${palette.muted};font-size:10px;line-height:1.2;margin-top:3px`,footerItems.join('  ·  ')));
+    renderProviderDetails(ctx,card,account);
   }
   for(const account of apiAccounts){
     const card=compactCard(list,account.active);
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
-    const display=hasOwn?currencyAmount(own.amount,own.currency):'—';
+    const capExpired=own?.kind==='key_limit'&&(!account.keyBudget||account.keyBudget.resetsAt&&account.keyBudget.resetsAt<=Date.now()||account.keyBudget.expiresAt&&account.keyBudget.expiresAt<=Date.now());
+    const display=hasOwn&&!capExpired?currencyAmount(own.amount,own.currency):'—';
     accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:null);
     const amountEl=card.querySelector('[data-pv-api-amount]');
     const ru=String(ctx.locale?.locale?.()||'en').startsWith('ru');
@@ -1799,6 +2341,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     if(extras.length) add(card,$('div',`margin-top:2px;font-size:10px;color:${palette.muted};font-variant-numeric:tabular-nums`,
       extras.map(b=>currencyAmount(b.amount,b.currency)).join(' · ')));
     renderConsoleBudgets(ctx,card,account);
+    renderProviderDetails(ctx,card,account);
     if(hasOwn && own.kind==='key_limit'){
       const lang=ctx.locale?.locale?.()||'en';
       const label=String(lang).startsWith('ru')?'Остаток лимита ключа, не баланс':'API key spending cap, not account balance';
@@ -1840,7 +2383,7 @@ function publicIntegrationAccounts(value) {
       const label=rawLabel&&!/^\s*(sk-[\w-]+|oc_sk_[\w-]+|Bearer\s+|eyJ[A-Za-z0-9_-]{24,})/.test(rawLabel)
         ?rawLabel.replace(/[\x00-\x1f]/g,'').slice(0,90):`${providerLabel(provider)} account`;
       accounts.push({id:`${integration.id}:${conn.id}`,provider,kind,label,
-        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],budgets:[],budgetMessage:null,checkedAt:0});
+        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],budgets:[],budgetMessage:null,metrics:[],notices:[],keyBudget:null,modelWindows:[],checkedAt:0});
     }
   }
   return accounts.slice(0,80);

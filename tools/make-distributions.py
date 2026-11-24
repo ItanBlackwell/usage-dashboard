@@ -18,7 +18,7 @@ portable_files = (
     'installer/Common.ps1', 'installer/Install-UsageDashboard.ps1',
     'installer/Uninstall-UsageDashboard.ps1',
     'Install.cmd', 'Uninstall.cmd', 'README.md', 'LICENSE', 'NOTICE',
-    'docs/INSTALLATION.md', 'docs/OPENCODE_BUDGETS.md', 'usage-dashboard-preview.png',
+    'docs/INSTALLATION.md', 'docs/OPENCODE_BUDGETS.md', 'docs/PROVIDER_METRICS.md', 'usage-dashboard-preview.png',
 )
 portable = release / f'Usage-Dashboard-Portable-{version}.zip'
 with zipfile.ZipFile(portable, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:

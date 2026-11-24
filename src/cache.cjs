@@ -8,6 +8,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const providerMetrics = require('./provider-metrics.cjs');
 
 const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0});
 const BUDGET_MESSAGES=new Set(['experimental_budget','no_budgets','unauthorized','forbidden','rate_limited','request_failed','invalid_payload','invalid_balance','unsupported_console','workspace_required','credential_not_readable','login_expired','login_required','plugin_ipc_unavailable']);
@@ -25,6 +26,15 @@ const readInterval = (value, fallback=5) => Number.isInteger(value) && value>=1 
 function cacheDirectory(env=process.env,home=os.homedir()) {
   return path.join(env.LOCALAPPDATA || path.join(home,'.cache'), 'usage-dashboard');
 }
+function cleanWindows(rows,models=false){
+  if(!Array.isArray(rows))return [];
+  return rows.slice(0,models?40:20).filter(w=>w&&typeof w.label==='string'&&
+    typeof w.usedPercent==='number'&&Number.isFinite(w.usedPercent)&&w.usedPercent>=0&&w.usedPercent<=100&&
+    typeof w.remainingPercent==='number'&&Number.isFinite(w.remainingPercent)&&w.remainingPercent>=0&&w.remainingPercent<=100&&
+    (!models||providerMetrics.safeModel(w.model)||['general','chat','text','image','video','speech','audio','search'].includes(w.model)))
+    .map(w=>({label:w.label.slice(0,40),usedPercent:w.usedPercent,remainingPercent:w.remainingPercent,
+      resetsAt:Number.isFinite(w.resetsAt)&&w.resetsAt>0?w.resetsAt:null,...(models?{model:w.model}:{})}));
+}
 function sanitizeSnapshot(value) {
   const result = EMPTY();
   if (!value || typeof value !== 'object') return result;
@@ -41,13 +51,12 @@ function sanitizeSnapshot(value) {
     balances:Array.isArray(a.balances)?a.balances.slice(0,2).filter(b=>b && b.kind==='balance'
       && ['USD','CNY'].includes(b.currency) && typeof b.amount==='number' && Number.isFinite(b.amount))
       .map(b=>({amount:b.amount,currency:b.currency,kind:'balance'})):[],
-    windows:Array.isArray(a.windows)?a.windows.slice(0,10).map(w=>({
-      label:String(w.label||'').slice(0,40), usedPercent:Number(w.usedPercent)||0,
-      remainingPercent:Number(w.remainingPercent)||0,
-      resetsAt:Number.isFinite(w.resetsAt)?w.resetsAt:null,
-    })):[],credits:Number.isFinite(a.credits)?a.credits:null,
+    windows:cleanWindows(a.windows),credits:Number.isFinite(a.credits)?a.credits:null,
     budgets:a.provider==='opencode'&&a.kind==='api'?sanitizeBudgets(a.budgets):[],
     budgetMessage:a.provider==='opencode'&&BUDGET_MESSAGES.has(a.budgetMessage)?a.budgetMessage:null,
+    metrics:providerMetrics.cleanMetrics(a.metrics),notices:providerMetrics.cleanNotices(a.notices),
+    keyBudget:a.provider==='openrouter'?providerMetrics.cleanKeyBudget(a.keyBudget):null,
+    modelWindows:a.provider==='minimax'?cleanWindows(a.modelWindows,true):[],
     checkedAt:Number.isFinite(a.checkedAt)?a.checkedAt:0,
   }));
   if (Array.isArray(value.organizations)) result.organizations=value.organizations.slice(0,16).map(o=>({
@@ -101,11 +110,13 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           ? previous.accounts.map(a=>({...a,state:'stale'}))
           : nextAccounts.map(a=>{
             const prev=prevById.get(a.id);
-            if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length)
-              return {...prev,state:'stale'};
+            if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length&&
+              prev.provider===a.provider&&prev.kind===a.kind&&
+              ['request_failed','rate_limited','invalid_payload','missing_windows','missing_rate_limits'].includes(a.message))
+              return {...a,windows:prev.windows,modelWindows:prev.modelWindows,credits:prev.credits,checkedAt:prev.checkedAt,state:'stale'};
             // Do not resurrect a Console balance from a different workspace
             // or a previous permission grant after its current read failed.
-            if(a.provider!=='opencode' && a.state==='error' && !a.balance && prev?.balance &&
+            if(a.provider!=='opencode' && a.provider!=='openrouter' && a.state==='error' && !a.balance && prev?.balance &&
               prev.provider===a.provider && prev.kind===a.kind &&
               ['request_failed','rate_limited','invalid_payload','invalid_balance'].includes(a.message))
               return {...a,balance:prev.balance,balances:prev.balances,checkedAt:prev.checkedAt,state:'stale'};

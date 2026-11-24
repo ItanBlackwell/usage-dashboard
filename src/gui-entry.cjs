@@ -23,17 +23,22 @@ const WindowSchema = Schema.Struct({ label:Schema.String, usedPercent:Schema.Num
   remainingPercent:Schema.Number, resetsAt:Schema.NullOr(Schema.Number) });
 const BudgetSchema = Schema.Struct({limitUsd:Schema.Number,spentUsd:Schema.NullOr(Schema.Number),remainingUsd:Schema.NullOr(Schema.Number),
   resetsAt:Schema.Number,scope:Schema.String,coverage:Schema.String,per:Schema.String,shared:Schema.Boolean});
+const DetailSchema=Schema.Struct({code:Schema.String,value:Schema.Number,currency:Schema.NullOr(Schema.String),model:Schema.NullOr(Schema.String),at:Schema.NullOr(Schema.Number)});
+const NoticeSchema=Schema.Struct({group:Schema.String,status:Schema.String});
+const KeyBudgetSchema=Schema.Struct({limit:Schema.NullOr(Schema.Number),remaining:Schema.NullOr(Schema.Number),period:Schema.NullOr(Schema.String),resetsAt:Schema.NullOr(Schema.Number),expiresAt:Schema.NullOr(Schema.Number),includeByok:Schema.NullOr(Schema.Boolean),freeTier:Schema.NullOr(Schema.Boolean)});
+const ModelWindowSchema=Schema.Struct({label:Schema.String,model:Schema.String,usedPercent:Schema.Number,remainingPercent:Schema.Number,resetsAt:Schema.NullOr(Schema.Number)});
 const AccountSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,kind:Schema.String,
   label:Schema.String,source:Schema.String,active:Schema.Boolean,state:Schema.String,message:Schema.String,
   windows:Schema.Array(WindowSchema),credits:Schema.NullOr(Schema.Number),balance:Schema.NullOr(ProviderBalanceSchema),balances:Schema.Array(ProviderBalanceSchema),
-  budgets:Schema.Array(BudgetSchema),budgetMessage:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+  budgets:Schema.Array(BudgetSchema),budgetMessage:Schema.NullOr(Schema.String),
+  metrics:Schema.Array(DetailSchema),notices:Schema.Array(NoticeSchema),keyBudget:Schema.NullOr(KeyBudgetSchema),modelWindows:Schema.Array(ModelWindowSchema),checkedAt:Schema.Number });
 const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:Schema.String,
   month:Schema.String,state:Schema.String,message:Schema.String,usdSpent:Schema.NullOr(Schema.Number),
   monthlyBudgetUsd:Schema.NullOr(Schema.Number),usdRemainingBudget:Schema.NullOr(Schema.Number),
   limitType:Schema.String,checkedAt:Schema.Number });
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
   inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v4',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v5',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -52,6 +57,7 @@ const money = value => currencyAmount(value,'USD');
 const snapshotListeners = new Set();
 // Per-desktop-window first-seen order survives closing and reopening the popup.
 const stableAccountOrder = new Map();
+const expandedAccountDetails=new Set();
 // Only an unconfirmed request may override active flags received from main.
 const visualIntents = new Map();
 let latestSelectedID=null;
@@ -193,6 +199,116 @@ function accountHeader(ctx,card,account,onSwitch,switchingID,api=false,summary=n
     b.addEventListener('click',()=>onSwitch(account.id));
   }
 }
+function renderProviderDetails(ctx,card,account){
+  const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru'),tr=(en,rus)=>ru?rus:en;
+  const labels={
+    topped_up:tr('Top-up funds','Пополнения'),granted:tr('Granted funds','Бонусы'),cash:tr('Cash balance','Денежные средства'),voucher:tr('Vouchers','Ваучеры'),
+    key_daily:tr('Key spend · today','Расход ключа · сегодня'),key_weekly:tr('Key spend · week','Расход ключа · неделя'),
+    key_monthly:tr('Key spend · month','Расход ключа · месяц'),key_total:tr('Key spend · total','Расход ключа · всего'),
+    byok_daily:tr('BYOK · today','BYOK · сегодня'),byok_weekly:tr('BYOK · week','BYOK · неделя'),byok_monthly:tr('BYOK · month','BYOK · месяц'),byok_total:tr('BYOK · total','BYOK · всего'),
+    wallet_total_credits:tr('Wallet credits · total','Кредиты кошелька · всего'),wallet_total_usage:tr('Wallet spend · total','Расход кошелька · всего'),
+    org_month_cost:tr('Organization spend · month (UTC)','Расход организации · месяц (UTC)'),org_model_cost:tr('Organization cost','Расход организации'),
+    org_month_tokens:tr('Organization tokens · month (UTC)','Токены организации · месяц (UTC)'),org_month_requests:tr('Organization requests · month (UTC)','Запросы организации · месяц (UTC)'),
+    org_model_tokens:tr('Organization tokens','Токены организации'),org_model_requests:tr('Organization requests','Запросы организации'),
+    extra_balance:tr('Extra Usage balance','Остаток Extra Usage'),extra_total:tr('Extra Usage total','Extra Usage · всего'),
+    extra_month_used:tr('Extra Usage spend · month','Extra Usage · расход за месяц'),extra_month_limit:tr('Extra Usage monthly cap','Extra Usage · месячный лимит'),
+    tokens_24h:tr('Tokens · 24h (monitor)','Токены · 24 ч (мониторинг)'),requests_24h:tr('Requests · 24h','Запросы · 24 ч'),
+    model_tokens_24h:tr('Tokens · 24h','Токены · 24 ч'),model_requests_24h:tr('Requests · 24h','Запросы · 24 ч'),
+    search_24h:tr('Web searches · 24h','Веб-поиск · 24 ч'),web_read_24h:tr('Web reads · 24h','Чтение веб · 24 ч'),zread_24h:tr('ZRead · 24h','ZRead · 24 ч'),
+    tool_calls_24h:tr('Search MCP · 24h','Поиск MCP · 24 ч'),grant_remaining:tr('Grant remaining','Остаток выделенных кредитов'),grant_used:tr('Grant used','Использовано кредитов'),plan_parallel:tr('Parallel requests','Параллельные запросы')
+  };
+  const groups={balance:tr('Balance','Баланс'),budget:tr('Budget','Бюджет'),usage:tr('Usage','Статистика'),cost:tr('Cost','Расходы'),tokens:tr('Tokens','Токены'),
+    extra:'Extra Usage',tools:tr('Tools','Инструменты'),grants:tr('Credit grants','Выделенные кредиты'),breakdown:tr('Breakdown','Детализация'),quota:tr('Quota','Лимиты')};
+  const reasons={
+    unsupported:tr('not supported with existing connection','не поддерживается с текущим подключением'),
+    no_usage_endpoint:tr('no supported endpoint','нет поддерживаемого API'),
+    no_balance_access:tr('wallet access not granted','нет доступа к кошельку'),
+    no_prepaid_balance:tr('no prepaid wallet','нет предоплаченного кошелька'),
+    no_limit:tr('no configured cap returned','лимит не задан или не возвращён'),
+    no_budgets:tr('no applicable budgets returned','нет доступных бюджетов'),
+    not_returned:tr('not returned by provider','не возвращается провайдером'),
+    unauthorized:tr('authorization rejected (401)','авторизация отклонена (401)'),
+    forbidden:tr('access denied (403)','нет прав доступа (403)'),
+    rate_limited:tr('request rate limited (429)','ограничена частота (429)'),
+    request_failed:tr('request failed or timed out','ошибка или таймаут запроса'),
+    invalid_payload:tr('unsupported response format','неподдерживаемый формат ответа'),
+    invalid_balance:tr('invalid balance response','некорректный баланс'),
+    missing_windows:tr('no usable quota returned','нет доступных лимитов'),
+    missing_rate_limits:tr('no usable quota returned','нет доступных лимитов'),
+    quota_unavailable:tr('unavailable','недоступны'),
+    sharing_no_usage_api:tr('this sign-in method does not expose quotas','этот способ входа не предоставляет лимиты'),
+    oauth_not_readable:tr('credential unavailable','учётные данные недоступны'),
+    credential_not_readable:tr('credential unavailable','учётные данные недоступны'),
+    login_expired:tr('login expired','срок входа истёк'),
+    workspace_required:tr('workspace missing','workspace не указан'),
+    unsupported_console:tr('unsupported Console origin','неподдерживаемый адрес Console'),
+    plugin_ipc_unavailable:tr('plugin service unavailable','служба плагина недоступна'),
+    insufficient_balance:tr('provider reports insufficient funds','провайдер сообщает о недостатке средств'),
+    experimental:tr('experimental','экспериментально'),
+    stale:tr('last known reading','последние известные данные')
+  };
+  const rows=account.metrics||[],notices=[...(account.notices||[])];
+  const hasBalance=account.balance?.kind==='balance'&&Number.isFinite(account.balance.amount);
+  const hasKey=account.keyBudget&&Number.isFinite(account.keyBudget.limit);
+  if(account.kind==='api'){
+    if(!hasBalance&&!notices.some(n=>n.group==='balance'))notices.push({group:'balance',status:account.message==='no_usage_endpoint'||account.message==='api_key_connected'?'unsupported':account.message==='key_limit_only'?'no_balance_access':account.message});
+    if(account.provider!=='opencode'&&!hasKey&&!notices.some(n=>n.group==='budget')){
+      const status=account.provider==='openrouter'&&account.state!=='ok'?account.message:'unsupported';
+      notices.push({group:'budget',status});
+    }
+    if(!rows.length&&!['opencode','claude','deepseek','kimi','openrouter','zai'].includes(account.provider)&&!notices.some(n=>n.group==='usage'))notices.push({group:'usage',status:'unsupported'});
+  }else if(!account.windows?.length&&!account.modelWindows?.length&&!notices.some(n=>n.group==='quota'))notices.push({group:'quota',status:account.message});
+  if(account.state==='stale')notices.unshift({group:'usage',status:'stale'});
+  const style='font-size:9.5px;line-height:1.25;color:'+palette.muted;
+  const list=add(card,$('div','display:flex;flex-direction:column;gap:2px;min-width:0;margin-top:3px'));
+  const row=(parent,label,value,tip='')=>{
+    const r=add(parent,$('div','display:flex;align-items:baseline;justify-content:space-between;gap:5px;min-width:0;'+style));
+    const name=add(r,$('span','min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',label));
+    add(r,$('span','flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums',value));r.title=tip||label;name.title=r.title;
+  };
+  const date=v=>{try{return Number.isFinite(v)?new Intl.DateTimeFormat(ru?'ru-RU':undefined,{dateStyle:'short',timeStyle:'short'}).format(new Date(v)):'—';}catch{return '—';}};
+  if(account.keyBudget){
+    const k=account.keyBudget,expired=k.expiresAt&&k.expiresAt<=Date.now(),reset=k.resetsAt&&k.resetsAt<=Date.now();
+    if(Number.isFinite(k.limit)){
+      const period={daily:tr('daily','день'),weekly:tr('weekly','неделя'),monthly:tr('monthly','месяц'),none:tr('no reset','без сброса')}[k.period]||'—';
+      row(list,tr('Key cap','Бюджет ключа')+' · '+period,money(expired||reset?null:k.remaining)+' / '+money(k.limit),
+        tr('Key spending cap, not wallet money','Лимит расходов ключа, не баланс')+'\n'+tr('Resets: ','Сброс: ')+date(k.resetsAt));
+    }
+    if(Number.isFinite(k.expiresAt))row(list,tr('Key expires','Ключ истекает'),date(k.expiresAt));
+  }
+  const renderMetric=(parent,m)=>{
+    const label=labels[m.code];if(!label)return;
+    const expired=m.code.startsWith('grant_')&&m.at&&m.at<=Date.now();
+    const amount=expired?'—':m.currency?currencyAmount(m.value,m.currency):Number(m.value).toLocaleString(ru?'ru-RU':'en-US');
+    const timeLabel=m.code.startsWith('org_')?tr('Data refreshed: ','Данные обновлены: '):tr('Expires: ','Истекает: ');
+    row(parent,label+(m.model?' · '+m.model:''),amount,m.at?timeLabel+date(m.at):'');
+  };
+  const primary=new Set(['topped_up','granted','cash','voucher','key_monthly','org_month_cost','org_month_tokens','extra_balance','tokens_24h']);
+  for(const m of rows.filter(m=>primary.has(m.code)))renderMetric(list,m);
+  const rest=rows.filter(m=>!primary.has(m.code)),models=account.modelWindows||[];
+  if(rest.length||models.length||account.keyBudget?.includeByok!==null&&account.keyBudget?.includeByok!==undefined||account.keyBudget?.freeTier!==null&&account.keyBudget?.freeTier!==undefined){
+    const details=add(list,$('details','min-width:0;'+style));details.open=expandedAccountDetails.has(account.id);
+    const summary=add(details,$('summary','cursor:pointer;white-space:nowrap',tr('More metrics','Подробнее')));
+    details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(account.id);else expandedAccountDetails.delete(account.id);});
+    const box=add(details,$('div','display:flex;flex-direction:column;gap:2px;padding-top:2px'));
+    if(typeof account.keyBudget?.includeByok==='boolean')row(box,tr('BYOK included in cap','BYOK учитывается в лимите'),account.keyBudget.includeByok?tr('Yes','Да'):tr('No','Нет'));
+    if(typeof account.keyBudget?.freeTier==='boolean')row(box,tr('Free tier','Бесплатный тариф'),account.keyBudget.freeTier?tr('Yes','Да'):tr('No','Нет'));
+    for(const m of rest)renderMetric(box,m);
+    for(const w of models)row(box,w.model+' · '+displayWindow(ctx,w.label),pct(w.remainingPercent),tr('Resets: ','Сброс: ')+date(w.resetsAt));
+  }
+  // Combine equal reasons into a compact, visible line. Keep different
+  // failures separate so a missing wallet never hides a working quota.
+  const grouped=new Map();
+  for(const n of notices){
+    if(!groups[n.group]||!reasons[n.status])continue;
+    const names=grouped.get(n.status)||new Set();names.add(groups[n.group]);grouped.set(n.status,names);
+  }
+  for(const [status,names] of grouped){
+    const line=add(list,$('span',style,[...names].join(' / ')+': '+reasons[status]));
+    line.setAttribute('data-pv-metric-notice',status);
+  }
+  if(!list.childNodes.length)list.remove();
+}
 function renderConsoleBudgets(ctx,card,account){
   if(account.provider!=='opencode')return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
@@ -284,12 +400,14 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
       try{footerItems.push(`◷ ${new Intl.DateTimeFormat(lang,{dateStyle:'short',timeStyle:'short'}).format(new Date(account.checkedAt))}`);}catch{}
     }
     if(footerItems.length)add(card,$('div',`color:${palette.muted};font-size:10px;line-height:1.2;margin-top:3px`,footerItems.join('  ·  ')));
+    renderProviderDetails(ctx,card,account);
   }
   for(const account of apiAccounts){
     const card=compactCard(list,account.active);
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
-    const display=hasOwn?currencyAmount(own.amount,own.currency):'—';
+    const capExpired=own?.kind==='key_limit'&&(!account.keyBudget||account.keyBudget.resetsAt&&account.keyBudget.resetsAt<=Date.now()||account.keyBudget.expiresAt&&account.keyBudget.expiresAt<=Date.now());
+    const display=hasOwn&&!capExpired?currencyAmount(own.amount,own.currency):'—';
     accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:null);
     const amountEl=card.querySelector('[data-pv-api-amount]');
     const ru=String(ctx.locale?.locale?.()||'en').startsWith('ru');
@@ -319,6 +437,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     if(extras.length) add(card,$('div',`margin-top:2px;font-size:10px;color:${palette.muted};font-variant-numeric:tabular-nums`,
       extras.map(b=>currencyAmount(b.amount,b.currency)).join(' · ')));
     renderConsoleBudgets(ctx,card,account);
+    renderProviderDetails(ctx,card,account);
     if(hasOwn && own.kind==='key_limit'){
       const lang=ctx.locale?.locale?.()||'en';
       const label=String(lang).startsWith('ru')?'Остаток лимита ключа, не баланс':'API key spending cap, not account balance';
@@ -360,7 +479,7 @@ function publicIntegrationAccounts(value) {
       const label=rawLabel&&!/^\s*(sk-[\w-]+|oc_sk_[\w-]+|Bearer\s+|eyJ[A-Za-z0-9_-]{24,})/.test(rawLabel)
         ?rawLabel.replace(/[\x00-\x1f]/g,'').slice(0,90):`${providerLabel(provider)} account`;
       accounts.push({id:`${integration.id}:${conn.id}`,provider,kind,label,
-        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],budgets:[],budgetMessage:null,checkedAt:0});
+        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],budgets:[],budgetMessage:null,metrics:[],notices:[],keyBudget:null,modelWindows:[],checkedAt:0});
     }
   }
   return accounts.slice(0,80);

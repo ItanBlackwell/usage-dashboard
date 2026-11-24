@@ -13,6 +13,11 @@ Public-release preparation for Usage Dashboard. This release is **not published*
 - Separate prepaid balance and policy budgets, including budget reset times.
   Remove browser-based financial data acquisition and runtime dependencies.
 
+- Extended provider metrics for DeepSeek, Moonshot, OpenRouter, Claude,
+  Kimi Code, MiniMax and Z.AI, with visible availability explanations.
+  Experimental or permission-dependent data is explicitly labeled.
+  See [provider metrics](docs/PROVIDER_METRICS.md).
+
 ## Installation (Windows)
 1. Download `Usage-Dashboard-Portable-0.13.0.zip` from Releases.
 2. Extract the ZIP, completely close OpenCode Desktop and run `Install.cmd`.

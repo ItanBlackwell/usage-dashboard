@@ -14,6 +14,11 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const base = require('./core.cjs');
+const metrics = require('./provider-metrics.cjs');
+const claudeApi = require('./provider-claude.cjs');
+const kimiExtras = require('./provider-kimi.cjs');
+const zaiApi = require('./provider-zai.cjs');
+const minimaxApi = require('./provider-minimax.cjs');
 
 // Only explicit, first-party integration IDs are accepted. Generic OpenAI-compatible
 // gateways MUST NOT be treated as any provider or receive its credentials.
@@ -229,19 +234,51 @@ function parseDeepSeekBalances(body) {
   return found.sort((a,b)=>Number(b.currency==='USD')-Number(a.currency==='USD'));
 }
 function parseDeepSeekBalance(body){return parseDeepSeekBalances(body)[0];}
+function deepSeekDetails(body){
+  const rows=[];
+  for(const v of body.balance_infos){
+    if(!['USD','CNY'].includes(v?.currency))continue;
+    for(const [field,code] of [['topped_up_balance','topped_up'],['granted_balance','granted']]){
+      const m=metrics.metric(code,v[field],{currency:v.currency});if(m)rows.push(m);
+    }
+  }
+  return {metrics:rows,notices:[{group:'budget',status:'unsupported'},{group:'usage',status:'unsupported'},
+    ...(rows.length<2*body.balance_infos.filter(v=>['USD','CNY'].includes(v?.currency)).length?[{group:'breakdown',status:'not_returned'}]:[]),
+    ...(body.is_available===false?[{group:'balance',status:'insufficient_balance'}]:[])]};
+}
 function parseKimiBalance(body,currency='USD') {
   // Moonshot v1 returns a business success indicator and may include a numeric
   // 'code' field. 0 is required when it is present; some older versions omit it.
   if(body?.status!==true || (body.code!==undefined && body.code!==0)) throw new Error('invalid_payload');
   return validBalance(body?.data?.available_balance,currency);
 }
-function parseOpenRouterKey(body) {
+function kimiDetails(body,currency){
+  const rows=[metrics.metric('cash',body?.data?.cash_balance,{currency}),metrics.metric('voucher',body?.data?.voucher_balance,{currency})].filter(Boolean);
+  return {metrics:rows,notices:[{group:'budget',status:'unsupported'},{group:'usage',status:'unsupported'},
+    ...(rows.length<2?[{group:'breakdown',status:'not_returned'}]:[])]};
+}
+function parseOpenRouterKey(body,now=Date.now()) {
   const v=object(body?.data);
   if(!v) throw new Error('invalid_payload');
-  const left=number(v.limit_remaining),limit=number(v.limit);
-  // A key spending cap is NEVER a prepaid wallet balance.
-  return {management:v.is_management_key===true,
-    limit:left!==null && limit!==null && limit>=0?validBalance(left,'USD','key_limit'):null};
+  const remaining=metrics.num(v.limit_remaining),limit=metrics.nonnegative(v.limit);
+  const left=remaining!==null&&Math.abs(remaining)<=1e12?Math.max(0,remaining):null;
+  const period=['daily','weekly','monthly'].includes(v.limit_reset)?v.limit_reset:v.limit_reset===null?'none':null;
+  let resetsAt=null;
+  if(period&&period!=='none'){
+    const d=new Date(now),today=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate());
+    if(period==='daily')resetsAt=today+86400000;
+    if(period==='weekly')resetsAt=today+(7-(d.getUTCDay()+6)%7)*86400000;
+    if(period==='monthly')resetsAt=Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1);
+  }
+  const expiresAt=typeof v.expires_at==='string'?Date.parse(v.expires_at):null;
+  const keyBudget=metrics.cleanKeyBudget({limit,remaining:limit===null?null:left,period,resetsAt,expiresAt,includeByok:v.include_byok_in_limit,freeTier:v.is_free_tier});
+  const rows=[];
+  for(const [field,code] of [['usage_daily','key_daily'],['usage_weekly','key_weekly'],['usage_monthly','key_monthly'],['usage','key_total'],
+    ['byok_usage_daily','byok_daily'],['byok_usage_weekly','byok_weekly'],['byok_usage_monthly','byok_monthly'],['byok_usage','byok_total']]){
+    const m=metrics.metric(code,v[field],{currency:'USD'});if(m)rows.push(m);
+  }
+  return {management:v.is_management_key===true,keyBudget,metrics:rows,
+    limit:left!==null&&limit!==null?validBalance(left,'USD','key_limit'):null};
 }
 function parseOpenRouterCredits(body) {
   const v=object(body?.data),credits=number(v?.total_credits),spent=number(v?.total_usage);
@@ -255,33 +292,42 @@ const measuredWindow=(label,limit,remaining,resetsAt)=>{
   return {label,usedPercent:100-pct,remainingPercent:pct,resetsAt:timestamp(resetsAt)};
 };
 function parseKimiCoding(body) {
+  if(!object(body)||body.code!==undefined&&body.code!==0||body?.data?.kind==='error')throw Error('invalid_payload');
   const windows=[];
-  const total=measuredWindow('Weekly',body?.usage?.limit,body?.usage?.remaining,body?.usage?.resetTime);
+  const counter=(label,item)=>{
+    const limit=number(item?.limit),used=number(item?.used);
+    const left=number(item?.remaining)??(limit!==null&&used!==null&&used>=0?Math.max(0,limit-used):null);
+    return measuredWindow(label,limit,left,item?.resetTime);
+  };
+  const total=counter('Weekly',body?.usage);
   if(total)windows.push(total);
   for(const item of Array.isArray(body?.limits)?body.limits:[]){
     const w=item?.window||{};
     const duration=number(w.duration);
     if(!((w.timeUnit==='TIME_UNIT_MINUTE'&&duration===300)||(w.timeUnit==='TIME_UNIT_HOUR'&&duration===5)))continue;
-    const win=measuredWindow('5-hour',item?.detail?.limit,item?.detail?.remaining,item?.detail?.resetTime);
+    const win=counter('5-hour',item?.detail);
     if(win)windows.push(win);
   }
-  if(!windows.length)throw new Error('missing_windows');
-  return {windows,credits:null};
+  const extended=kimiExtras.parseExtras(body,windows,timestamp);
+  if(!extended.windows.length&&!extended.metrics.length)throw new Error('missing_windows');
+  return {credits:null,...extended};
 }
 function parseZaiQuota(body){
-  if(!Array.isArray(body?.data?.limits)) throw new Error('missing_windows');
+  if(body?.success===false||!Array.isArray(body?.data?.limits)) throw new Error('missing_windows');
   const windows=[];
   for(const item of body.data.limits){
-    if(item?.type!=='TOKENS_LIMIT')continue;
+    if(!['TOKENS_LIMIT','CREDIT_LIMIT','TIME_LIMIT'].includes(item?.type))continue;
     const unit=number(item.unit),duration=number(item.number);
     let label;
-    if(unit===3&&duration===5)label='5-hour';
-    if(unit===6&&duration===1)label='Weekly';
+    if(item.type==='TIME_LIMIT'&&unit===5&&duration===1)label='Monthly · MCP';
+    if(item.type!=='TIME_LIMIT'&&unit===3&&duration===5)label='5-hour';
+    if(item.type!=='TIME_LIMIT'&&unit===6&&duration===1)label='Weekly';
     if(!label)continue;
     // The field 'usage' denotes total available credits, not usage consumed.
-    const left=number(item.remaining),total=number(item.usage);
+    const total=number(item.usage),current=number(item.currentValue);
+    const left=number(item.remaining)??(total!==null&&current!==null&&current>=0?Math.max(0,total-current):null);
     let win=measuredWindow(label,total,left,item.nextResetTime);
-    if(!win){
+    if(!win&&total!==0){
       const used=number(item.percentage);
       if(used!==null&&used>=0&&used<=100)win={label,usedPercent:used,remainingPercent:100-used,resetsAt:timestamp(item.nextResetTime)};
     }
@@ -290,33 +336,7 @@ function parseZaiQuota(body){
   if(!windows.length)throw new Error('missing_windows');
   return {windows,credits:null};
 }
-function parseMiniMaxQuota(body){
-  if(number(body?.base_resp?.status_code)!==null && number(body.base_resp.status_code)!==0)throw new Error('quota_unavailable');
-  const rows=Array.isArray(body?.model_remains)?body.model_remains:[];
-  if(!rows.length)throw new Error('missing_windows');
-  // Prefer text/chat pools. A video-only row may report 100% remaining when
-  // its total is 0, even though video generation is unavailable.
-  const sorted=[...rows].sort((a,b)=>{
-    const score=x=>/^(?:general|chat|text)$|minimax-m/i.test(String(x?.model_name||x?.model||''))?0:1;
-    return score(a)-score(b);
-  });
-  const selected=sorted[0];
-  const windows=[];
-  for(const [prefix,label] of [['current_interval','5-hour'],['current_weekly','Weekly']]){
-    const total=number(selected?.[`${prefix}_total_count`]);
-    // When total=0, 100% from the API cannot be trusted as an allowance.
-    if(total===0)continue;
-    const percent=number(selected?.[`${prefix}_remaining_percent`]);
-    const left=number(selected?.[`${prefix}_usage_count`]); // Token Plan endpoint: REMAINING, not spent.
-    let win=total!==null&&total>0&&left!==null?measuredWindow(label,total,left,selected?.end_time):null;
-    if(!win&&percent!==null&&percent>=0&&percent<=100){
-      win={label,usedPercent:100-percent,remainingPercent:percent,resetsAt:timestamp(selected?.end_time)};
-    }
-    if(win)windows.push(win);
-  }
-  if(!windows.length)throw new Error('missing_windows');
-  return {windows,credits:null};
-}
+function parseMiniMaxQuota(body){return minimaxApi.parse(body,timestamp,measuredWindow);}
 function parseOpenCodeGoUsage(body) {
   const windows = [];
   for (const [key,label] of [['rolling','5-hour'],['weekly','Weekly'],['monthly','Monthly']]) {
@@ -410,10 +430,10 @@ async function queryOpenCodeConsole(entry,fetcher){
 }
 // Never send a stored provider token to user-supplied URLs, gateways, mirrors or
 // a different provider's hostname. The mapping here is deliberately fixed.
-async function queryAdditional(entry,fetcher){
+async function queryAdditional(entry,fetcher,time=nowMs()){
   if(entry.provider==='opencode')return queryOpenCodeConsole(entry,fetcher);
   if(['gemini','qwen'].includes(entry.provider))
-    return {state:'unavailable',message:'no_usage_endpoint'};
+    return {state:'unavailable',message:'no_usage_endpoint',notices:['balance','budget','usage'].map(group=>({group,status:'unsupported'}))};
   const key=entry.apiKey || entry.access;
   if(!key)return {state:'unavailable',message:'credential_not_readable'};
   const headers={Authorization:`Bearer ${key}`,Accept:'application/json'};
@@ -425,7 +445,7 @@ async function queryAdditional(entry,fetcher){
   if(entry.provider==='deepseek'){
     const value=await fetchSafe('https://api.deepseek.com/user/balance',headers,fetcher);
     const balances=parseDeepSeekBalances(value);
-    return {state:'ok',message:'ok',balance:balances[0],balances};
+    return {state:'ok',message:'ok',balance:balances[0],balances,...deepSeekDetails(value)};
   }
   if(entry.provider==='kimi'){
     if(isCodingPlan(entry.integrationID)){
@@ -434,45 +454,57 @@ async function queryAdditional(entry,fetcher){
     }
     const cn=/(?:-cn)$/.test(entry.integrationID);
     const value=await fetchSafe(cn?'https://api.moonshot.cn/v1/users/me/balance':'https://api.moonshot.ai/v1/users/me/balance',headers,fetcher);
-    return {state:'ok',message:'ok',balance:parseKimiBalance(value,cn?'CNY':'USD')};
+    const currency=cn?'CNY':'USD';
+    return {state:'ok',message:'ok',balance:parseKimiBalance(value,currency),...kimiDetails(value,currency)};
   }
   if(entry.provider==='openrouter'){
-    const info=parseOpenRouterKey(await fetchSafe('https://openrouter.ai/api/v1/key',headers,fetcher));
+    const info=parseOpenRouterKey(await fetchSafe('https://openrouter.ai/api/v1/key',headers,fetcher),time);
+    const rows=[...info.metrics],notices=[];
+    let wallet=null;
     if(info.management){
-      const value=await fetchSafe('https://openrouter.ai/api/v1/credits',headers,fetcher);
-      return {state:'ok',message:'ok',balance:parseOpenRouterCredits(value)};
-    }
-    return {state:'ok',message:info.limit?'key_limit_only':'no_balance_access',balance:info.limit};
+      try{
+        const value=await fetchSafe('https://openrouter.ai/api/v1/credits',headers,fetcher);
+        wallet=parseOpenRouterCredits(value);
+        for(const [field,code] of [['total_credits','wallet_total_credits'],['total_usage','wallet_total_usage']]){
+          const m=metrics.metric(code,value?.data?.[field],{currency:'USD'});if(m)rows.push(m);
+        }
+      }catch(e){notices.push({group:'balance',status:metrics.reason(e)});}
+    }else notices.push({group:'balance',status:'no_balance_access'});
+    if(info.keyBudget.limit===null)notices.push({group:'budget',status:'no_limit'});
+    else if(info.keyBudget.remaining===null)notices.push({group:'budget',status:'not_returned'});
+    if(!info.metrics.length)notices.push({group:'usage',status:'not_returned'});
+    return {state:'ok',message:wallet?'ok':info.limit?'key_limit_only':'no_balance_access',
+      balance:wallet||info.limit,keyBudget:info.keyBudget,metrics:rows,notices};
   }
   if(entry.provider==='minimax'){
     // Some MiniMax Subscription Keys are connected under the general MiniMax ID.
     // Only a recognisable subscription key may use the Token Plan endpoint.
     if(!isCodingPlan(entry.integrationID) && !String(entry.apiKey||'').startsWith('sk-cp-'))
-      return {state:'unavailable',message:'no_usage_endpoint'};
+      return {state:'unavailable',message:'no_usage_endpoint',notices:['balance','budget','usage'].map(group=>({group,status:'unsupported'}))};
     const cn=/(?:-cn)(?:-|$)/.test(entry.integrationID);
     const value=await fetchSafe(cn?'https://www.minimaxi.com/v1/token_plan/remains':'https://www.minimax.io/v1/token_plan/remains',headers,fetcher);
     return {state:'ok',message:'ok',kind:'subscription',...parseMiniMaxQuota(value)};
   }
-  if(entry.provider==='zai'){
-    // Experimental, undocumented Coding Plan endpoint. It must fail closed,
-    // without inventing a quota from an ordinary OpenAI-compatible API key.
-    const cn=entry.integrationID.startsWith('zhipuai') || entry.integrationID==='zai-cn-coding-plan';
-    const value=await fetchSafe(cn?'https://open.bigmodel.cn/api/monitor/usage/quota/limit':'https://api.z.ai/api/monitor/usage/quota/limit',headers,fetcher);
-    return {state:'ok',message:'experimental_quota',kind:'subscription',...parseZaiQuota(value)};
-  }
-  return {state:'unavailable',message:'no_usage_endpoint'};
+  if(entry.provider==='zai')return zaiApi.query(entry,fetchSafe,fetcher,time,parseZaiQuota);
+  return {state:'unavailable',message:'no_usage_endpoint',notices:['balance','budget','usage'].map(group=>({group,status:'unsupported'}))};
 }
 async function queryQuota(entry, fetcher = fetch, time = nowMs()) {
   const safe = { id: entry.id, provider: entry.provider, kind: entry.kind, label: entry.label,
     source: entry.source, active: entry.active, state:'unavailable', message:'quota_unavailable',
-    windows:[], credits:null, balance:null, balances:[], budgets:[],budgetMessage:null,checkedAt:time };
+    windows:[], credits:null, balance:null, balances:[], budgets:[],budgetMessage:null,
+    metrics:[],notices:[],keyBudget:null,modelWindows:[],checkedAt:time };
   if (!['codex','claude'].includes(entry.provider)) {
     if (entry.needsAuth) return {...safe,message:'login_required',budgetMessage:entry.provider==='opencode'?'login_required':null};
-    try{return {...safe,...await queryAdditional(entry,fetcher)};}
+    if(entry.tokenMethod==='oauth'&&entry.expires&&entry.expires<time+10000)
+      return {...safe,message:'login_expired'};
+    try{return {...safe,...await queryAdditional(entry,fetcher,time)};}
     catch(e){return {...safe,state:'error',message:errorReason(e)};}
   }
-  if (entry.kind !== 'subscription') return { ...safe, message:entry.provider==='codex'?'no_usage_endpoint':'api_key_connected' };
   if (entry.needsAuth) return { ...safe, message:'login_required' };
+  if (entry.kind !== 'subscription'){
+    if(entry.provider==='claude')return {...safe,...await claudeApi.query(entry,fetchSafe,fetcher,time)};
+    return {...safe,message:'no_usage_endpoint',notices:[{group:'balance',status:'unsupported'},{group:'budget',status:'unsupported'},{group:'usage',status:'unsupported'}]};
+  }
   if (!entry.access) return { ...safe, message:'oauth_not_readable' };
   // The current 'Sign in with ChatGPT' token-sharing credential is scoped to
   // api.openai.com/v1, not the Codex wham/usage endpoint. A request to wham

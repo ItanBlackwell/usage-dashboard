@@ -2,6 +2,15 @@
 
 ## 0.13.0 (unreleased)
 
+- Expand DeepSeek and Moonshot balance breakdowns and OpenRouter key spending,
+  BYOK, cap/reset and expiration metrics using existing credentials.
+- Add permission-aware Claude organization analytics (documented beta),
+  additional Kimi Code quota/Extra Usage parsing, MiniMax per-model quota
+  windows, and isolated experimental Z.AI model/tool/credit grant reads.
+- Display unsupported, denied, missing and failed metrics directly in compact
+  account cards, with expandable detail rows. Keep monetary balances distinct
+  from spending caps and reject malformed or unavailable counters.
+
 - Read OpenCode Console budget policies and prepaid credit balances directly
   with existing provider credentials, independently handling permissions.
   Show separate budget scope, remaining allowance and reset times; do not sum

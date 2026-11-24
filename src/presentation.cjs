@@ -95,10 +95,11 @@ function mergeInventoryFallback(inventory,previous) {
   const accounts=current.map(a=>{
     const p=byId.get(a.id);
     if(!p||p.provider!==a.provider||p.kind!==a.kind||p.source!==a.source||p.message==='login_required')return a;
-    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits)||(p.budgets||[]).length;
+    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits)||(p.budgets||[]).length||(p.metrics||[]).length||(p.modelWindows||[]).length||p.keyBudget;
     if(!known)return a;
     return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
       credits:p.credits,budgets:(p.budgets||[]).filter(b=>b.resetsAt>Date.now()),
+      metrics:p.metrics||[],notices:p.notices||[],modelWindows:p.modelWindows||[],keyBudget:p.keyBudget||null,
       budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
       checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
@@ -113,9 +114,13 @@ function indicatorPresentation(account,snapshot) {
   if(!account)return {mode:'unavailable'};
   if(account.kind==='api'){
     const own=account.balance;
-    // A key spending cap is NOT wallet money. Keep the ring unknown instead of
-    // misrepresenting it as a prepaid balance.
+    // An actual wallet balance takes priority over a separately marked cap.
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
+    // A key cap is separately marked as a budget, not a wallet.
+    if(own?.kind==='key_limit'&&Number.isFinite(own.amount)&&account.keyBudget&&
+      (!account.keyBudget.resetsAt||account.keyBudget.resetsAt>Date.now())&&
+      (!account.keyBudget?.expiresAt||account.keyBudget.expiresAt>Date.now()))
+      return {mode:'api',amount:own.amount,currency:own.currency,metric:'budget'};
     const budget=tightestGeneralBudget(account);
     if(budget)return {mode:'api',amount:budget.remainingUsd,currency:'USD',metric:'budget'};
     return {mode:'api',amount:null,currency:'USD'};

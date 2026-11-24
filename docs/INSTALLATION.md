@@ -54,7 +54,8 @@ providers' supported metrics.
 ## API balances
 
 Balances require supported provider APIs. Missing values do **not** mean a
-zero balance. Hover over an amount for the reason. For OpenAI API, actual
+zero balance. Availability reasons are visible in each account card; expand
+**More metrics** for additional readings. See [provider metrics](PROVIDER_METRICS.md). For OpenAI API, actual
 prepaid credit balance is unavailable; configured Admin API keys still permit
 organization cost and budget reporting. Browser-derived balances are retired.
 

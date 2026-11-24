@@ -34,6 +34,14 @@ and the potential impact. Redact all secrets and private account data.
   accessed. Migration removes known retired installed components only.
 - No private snapshots, browser profiles or environment secrets are distributed
   with source or release archives.
+- Extended provider metrics use a bounded whitelist of numeric values,
+  currencies, fixed status codes and recognized public model identifiers.
+  Raw response labels, private identities, credentials and cursors stay in
+  the main process. Experimental routes are isolated by provider; every
+  request is read-only, uses a fixed first-party host, rejects redirects and
+  has a timeout. Claude analytics is explicitly organization-scoped, never
+  attributed to the selected key alone. No new credentials or scopes are
+  requested.
 - Quota integration endpoints may change or become unavailable without notice.
 
 ## Contributor hygiene

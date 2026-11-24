@@ -77,6 +77,17 @@ See [OpenCode budgets and credits](docs/OPENCODE_BUDGETS.md).
   Temporary provider errors preserve the last confirmed API balance.
 - The experimental OpenCode GUI SDK may change without backward compatibility.
 
+## Financial metrics and availability
+
+Usage Dashboard reuses existing provider connections. Wallet balances, key
+spending caps, organization analytics and subscription quotas remain distinct.
+Each connected account shows supported data and a visible explanation when a
+metric is unsupported, not returned, forbidden or temporarily unavailable.
+Expand **More metrics** for detailed spending, model counters and quota windows.
+
+See [provider metrics and endpoints](docs/PROVIDER_METRICS.md) for the
+supported and experimental contracts.
+
 ## Features
 
 - Sidebar icon with colored quota rings and a compact account popup.

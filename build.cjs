@@ -11,6 +11,13 @@ const path = require('node:path');
 const root = __dirname;
 const oldCore = fs.readFileSync(path.join(root,'src/core.cjs'),'utf8');
 const accounts = fs.readFileSync(path.join(root,'src/accounts.cjs'),'utf8');
+const providerModules=['provider-metrics','provider-claude','provider-kimi','provider-zai','provider-minimax'];
+const moduleVar=name=>'__'+name.replaceAll('-','_');
+const inlineProviders=source=>providerModules.reduce((text,name)=>text.replaceAll("require('./"+name+".cjs')",moduleVar(name)+'.exports'),source);
+const providerBundle=providerModules.map(name=>{
+  const variable=moduleVar(name),source=inlineProviders(fs.readFileSync(path.join(root,'src/'+name+'.cjs'),'utf8'));
+  return 'const '+variable+'={exports:{}}; (function(module,exports){\n'+source+'\n})('+variable+','+variable+'.exports);\n';
+}).join('');
 const gui = fs.readFileSync(path.join(root,'src/gui-entry.cjs'),'utf8');
 const cache = fs.readFileSync(path.join(root,'src/cache.cjs'),'utf8');
 const presentation = fs.readFileSync(path.join(root,'src/presentation.cjs'),'utf8');
@@ -33,8 +40,9 @@ const banner = [
 ].join('\n') + '\n';
 const text = banner + `'use strict';\n` +
   `const __old={exports:{}}; (function(module,exports){\n${oldCore}\n})(__old,__old.exports);\n` +
-  `const __accounts={exports:{}}; (function(module,exports){\n${accounts.replace("const base = require('./core.cjs');",'const base = __old.exports;')}\n})(__accounts,__accounts.exports);\n` +
-  `const __cache={exports:{}}; (function(module,exports){\n${cache}\n})(__cache,__cache.exports);\n` +
+  providerBundle +
+  `const __accounts={exports:{}}; (function(module,exports){\n${inlineProviders(accounts).replace("const base = require('./core.cjs');",'const base = __old.exports;')}\n})(__accounts,__accounts.exports);\n` +
+  `const __cache={exports:{}}; (function(module,exports){\n${inlineProviders(cache)}\n})(__cache,__cache.exports);\n` +
   `const __presentation={exports:{}}; (function(module,exports){\n${presentation}\n})(__presentation,__presentation.exports);\n` +
   `const __switchQueue={exports:{}}; (function(module,exports){\n${switchQueue}\n})(__switchQueue,__switchQueue.exports);\n` +
   `const __nativeUpdate={exports:{}}; (function(module,exports){\n${nativeUpdate}\n})(__nativeUpdate,__nativeUpdate.exports);\n` +
