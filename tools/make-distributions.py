@@ -35,13 +35,10 @@ if integrity != pin['integrity']:
 
 portable_files = (
     'package.json', 'package-lock.json', 'billing-runtime.json', 'dist/gui-experimental.cjs',
-    'browser-extension/manifest.json', 'browser-extension/background.js',
-    'browser-extension/content.js',
     'installer/Common.ps1', 'installer/Install-UsageDashboard.ps1',
     'installer/Uninstall-UsageDashboard.ps1',
     'Install.cmd', 'Uninstall.cmd', 'README.md', 'LICENSE', 'NOTICE',
-    'docs/INSTALLATION.md', 'docs/BROWSER_EXTENSION.md', 'docs/BILLING_SESSION.md', 'usage-dashboard-preview.png',
-    'browser-extension/NOTICE.txt',
+    'docs/INSTALLATION.md', 'docs/BILLING_SESSION.md', 'usage-dashboard-preview.png',
 )
 portable = release / f'Usage-Dashboard-Portable-{version}.zip'
 with zipfile.ZipFile(portable, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
@@ -52,10 +49,11 @@ with zipfile.ZipFile(portable, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
     z.writestr('Usage-Dashboard/vendor/playwright-core.tgz', runtime)
 
 source = release / f'Usage-Dashboard-Source-{version}.zip'
-excludes = {'.git', '.github-cache', 'release', 'node_modules', '__pycache__', 'tests', 'billing-sessions', '.usage-dashboard-userdata', 'vendor'}
+excludes = {'.git', '.github-cache', 'release', 'node_modules', '__pycache__', 'tests', 'billing-sessions', '.usage-dashboard-userdata', 'vendor', 'browser-extension'}
 with zipfile.ZipFile(source, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
     for p in sorted(ROOT.rglob('*')):
         if not p.is_file() or any(part in excludes for part in p.relative_to(ROOT).parts): continue
+        if p.relative_to(ROOT).as_posix() in {'src/balance-bridge.cjs', 'docs/BROWSER_EXTENSION.md'}: continue
         if p.name in {'pairing.json', 'settings.json', 'binding.json', 'snapshot.json', 'Test-UsageDashboard.ps1', 'test-results.txt'} or p.name.startswith('.env') or p.suffix in {'.tmp','.bak','.log'}: continue
         z.write(p, f'Usage-Dashboard-Source/{p.relative_to(ROOT).as_posix()}')
 

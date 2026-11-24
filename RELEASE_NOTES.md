@@ -9,6 +9,7 @@ Public-release preparation for Usage Dashboard. This release is **not published*
   switching between saved accounts.
 - Persistent cache and optional per-account Billing Sessions for OpenAI API
   and OpenCode Zen using Edge or Chrome, without a browser extension.
+  The previous browser companion and its local HTTP receiver are removed.
 
 ## Installation (Windows)
 1. Download `Usage-Dashboard-Portable-0.13.0.zip` from Releases.

@@ -9,7 +9,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null,billingSessions:[]});
+const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,billingSessions:[]});
 const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
 function sanitizeBillingSessions(value,accounts) {
   if(!Array.isArray(value))return [];
@@ -63,12 +63,6 @@ function sanitizeSnapshot(value) {
   }));
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
-  for(const field of ['browserBalance','zenBrowserBalance']){
-    const b=value[field];
-    if(b && b.currency==='USD' && typeof b.usd==='number' && Number.isFinite(b.usd)
-      && typeof b.observedAt==='number' && Number.isFinite(b.observedAt))
-      result[field]={usd:b.usd,currency:'USD',observedAt:b.observedAt,source:'billing-page'};
-  }
   result.billingSessions=sanitizeBillingSessions(value.billingSessions,result.accounts);
   return result;
 }
@@ -123,7 +117,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance,zenBrowserBalance:previous.zenBrowserBalance,billingSessions:previous.billingSessions});
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,billingSessions:previous.billingSessions});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -132,15 +126,6 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     return busy;
   }
   const cached=async()=>{await init();return sanitizeSnapshot(snapshot);};
-  const receiveBalance=async balance=>{
-    await init();
-    const field=balance.provider==='opencode'?'zenBrowserBalance':'browserBalance';
-    if(snapshot[field]?.observedAt>balance.observedAt)return sanitizeSnapshot(snapshot);
-    snapshot=sanitizeSnapshot({...snapshot,[field]:balance});
-    inform();
-    await write();
-    return snapshot;
-  };
   const setBillingSession=async(id,provider,session)=>{
     await init();
     if(!snapshot.accounts.some(a=>a.id===id&&a.provider===provider&&a.kind==='api'&&a.message!=='login_required'))return sanitizeSnapshot(snapshot);
@@ -195,6 +180,6 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     timer=setInterval(()=>void refresh(true),interval);timer.unref?.();
   };
   const stop=()=>{if(timer)clearInterval(timer);};
-  return {cached,refresh,receiveBalance,setBillingSession,markActive,syncActive,start,stop};
+  return {cached,refresh,setBillingSession,markActive,syncActive,start,stop};
 }
 module.exports={EMPTY,readInterval,sanitizeSnapshot,cacheDirectory,persistentMonitor};

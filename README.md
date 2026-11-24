@@ -56,7 +56,8 @@ is necessary. **Manual authorization is still required:**
 The plugin then attempts periodic background reads using that isolated session.
 If login expires, reconnect manually. The experimental page reader may fail if
 the provider changes its site. See [Billing Session setup](docs/BILLING_SESSION.md).
-The [legacy browser companion](docs/BROWSER_EXTENSION.md) remains optional.
+The previous browser companion is no longer supported. If you installed it
+before, remove it from Edge or Chrome using the browser's extensions page.
 
 ## Compatibility and limits
 
@@ -119,10 +120,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the
 
 Usage Dashboard communicates with connected provider endpoints to obtain
 available usage data; it is not an official product of OpenCode or the AI
-providers it integrates with. The optional browser companion communicates with
-a local loopback-only receiver (default port 18746) using a generated secret.
-Do not share local `pairing.json`, tokens, isolated billing profiles or cached
-private information.
+providers it integrates with. Billing Session uses dedicated local browser
+profiles and does not require an extension or a local HTTP receiver.
+Do not share tokens, isolated billing profiles or cached private information.
 
 Copyright (c) 2026 ItanBlackwell. Licensed under MPL-2.0.
 See [LICENSE](LICENSE) and [NOTICE](NOTICE).

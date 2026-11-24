@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for file in src/*.cjs browser-extension/*.js build.cjs; do node --check "$file"; done
+          for file in src/*.cjs build.cjs; do node --check "$file"; done
           node build.cjs
           node --check dist/gui-experimental.cjs
           node -e 'const p=require("./package.json");if(p.name!=="usage-dashboard"||!p.exports?.["./gui-experimental"])process.exit(1)'
@@ -46,10 +46,24 @@ jobs:
           assert.equal(p.formatCurrency(0,'USD'),'$0.00');
           assert.equal(p.formatCurrency(0,'CNY'),'¥0.00');
           assert.equal(p.formatCurrency(null,'USD'),'—');
-          const b = {...placeholder,id:'openai:a',provider:'codex'};
-          const previous = {accounts:[b],browserBalance:{usd:0,currency:'USD',observedAt:42,source:'billing-page'}};
-          assert.equal(p.browserBalanceFor(b,p.mergeInventoryFallback({accounts:[b]},previous)).usd,0);
-          assert.equal(p.mergeInventoryFallback({accounts:[b,{...b,id:'openai:b'}]},previous).browserBalance,null);
+          const cache = require('./src/cache.cjs');
+          const b = {...a,id:'openai:a',provider:'codex',balance:null,message:'api_key_connected'};
+          const other = {...b,id:'openai:b'};
+          const zen = {...b,id:'opencode:a',provider:'opencode'};
+          const legacy = {accounts:[b,other,zen],browserBalance:{usd:7,currency:'USD'},zenBrowserBalance:{usd:0,currency:'USD'}};
+          const sanitized=cache.sanitizeSnapshot(legacy);
+          assert.equal(Object.hasOwn(sanitized,'browserBalance'),false);
+          assert.equal(Object.hasOwn(sanitized,'zenBrowserBalance'),false);
+          assert.equal(p.indicatorPresentation(b,legacy).amount,null);
+          assert.equal(p.indicatorPresentation(zen,legacy).amount,null);
+          const previous=cache.sanitizeSnapshot({...legacy,billingSessions:[{id:b.id,provider:b.provider,state:'ok',amount:0,checkedAt:42}]});
+          assert.equal(p.indicatorPresentation(b,previous).amount,0);
+          assert.equal(p.indicatorPresentation(other,previous).amount,null);
+          assert.equal(p.indicatorPresentation(zen,previous).amount,null);
+          const merged=p.mergeInventoryFallback({accounts:[b,other,zen]},previous);
+          assert.equal(p.billingSessionBalance(b,merged).usd,0);
+          assert.equal(merged.billingSessions[0].state,'stale');
+          assert.equal(p.billingSessionBalance(other,merged),null);
           NODE
       - name: Verify Billing action responses
         shell: bash
@@ -99,6 +113,7 @@ jobs:
                   assert names and not any('/tests/' in '/'+name or name.endswith('Test-UsageDashboard.ps1') for name in names)
                   assert not any(name.endswith(('pairing.json','settings.json','binding.json','snapshot.json','.env')) for name in names)
                   assert not any('billing-sessions/' in name or '.usage-dashboard-userdata/' in name for name in names)
+                  assert not any('/browser-extension/' in name or name.endswith(('/balance-bridge.cjs','/BROWSER_EXTENSION.md')) for name in names)
                   if kind == 'Portable':
                       assert 'Usage-Dashboard/vendor/playwright-core.tgz' in names
                       assert 'Usage-Dashboard/billing-runtime.json' in names
@@ -122,25 +137,28 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { throw "Invalid PowerShell: $($_.Name): $($errors -join '; ')" }
           }
-      - name: Verify Billing browser selection
+      - name: Verify Billing Session browser selection
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          . ./installer/Common.ps1
-          $fixture = Join-Path $env:RUNNER_TEMP 'billing-browser-fixture'
-          $edge = Join-Path $fixture 'Microsoft\Edge\Application\msedge.exe'
-          $chrome = Join-Path $fixture 'Google\Chrome\Application\chrome.exe'
-          foreach ($file in @($edge,$chrome)) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $file) | Out-Null
-            New-Item -ItemType File -Force -Path $file | Out-Null
-          }
-          $browser = Get-BillingBrowser -InstallRoots @($fixture) -SkipRegistry
-          if ($browser.Executable -ne $edge -or $browser.ExtensionsUrl -ne 'edge://extensions') { throw 'Edge must take priority' }
-          Remove-Item -LiteralPath $edge
-          $browser = Get-BillingBrowser -InstallRoots @($fixture) -SkipRegistry
-          if ($browser.Executable -ne $chrome -or $browser.ExtensionsUrl -ne 'chrome://extensions') { throw 'Chrome fallback failed' }
-          Remove-Item -LiteralPath $chrome
-          if ($null -ne (Get-BillingBrowser -InstallRoots @($fixture) -SkipRegistry)) { throw 'Unexpected browser detected' }
+          @'
+          const assert=require('node:assert/strict');
+          const path=require('node:path');
+          const {findBrowser}=require('./src/billing-session.cjs');
+          (async()=>{
+            const root=path.join(process.env.RUNNER_TEMP,'billing-browser-fixture');
+            const edge=path.join(root,'Microsoft','Edge','Application','msedge.exe');
+            const chrome=path.join(root,'Google','Chrome','Application','chrome.exe');
+            const installed=new Set([edge,chrome]);
+            const access=async p=>{if(!installed.has(p))throw Error('missing');};
+            const env={ProgramFiles:root};
+            assert.equal((await findBrowser(null,env,access)).executablePath,edge);
+            installed.delete(edge);
+            assert.equal((await findBrowser(null,env,access)).executablePath,chrome);
+            installed.delete(chrome);
+            assert.equal(await findBrowser(null,env,access),null);
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { throw 'Browser selection check failed' }
       - name: Clean-room installation and removal smoke check (Windows PowerShell 5.1)
         shell: powershell
         run: |
@@ -150,9 +168,7 @@ jobs:
           if (-not $?) { throw 'Installer failed' }
           $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
           if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing after installation' }
-          foreach ($name in @('manifest.json','background.js','content.js','pairing.json')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $target "browser-extension/$name") -PathType Leaf)) { throw "Missing installed companion file: $name" }
-          }
+          if (Test-Path -LiteralPath (Join-Path $target 'browser-extension')) { throw 'Retired companion installed' }
           $runtime = Join-Path $target 'node_modules/playwright-core/package.json'
           if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) { throw 'Billing runtime missing' }
           $pin = Get-Content billing-runtime.json -Raw | ConvertFrom-Json
@@ -186,11 +202,29 @@ jobs:
           })().catch(e=>{console.error(e);process.exitCode=1;});
           '@ | node
           if ($LASTEXITCODE -ne 0) { throw 'Billing browser launch smoke failed' }
-          $pairing = Join-Path $target 'browser-extension/pairing.json'
-          $before = [IO.File]::ReadAllText($pairing)
+          $saved = Join-Path $env:OPENCODE_CONFIG_DIR '.usage-dashboard-userdata'
+          $legacy = Join-Path $target 'browser-extension'
+          $savedLegacy = Join-Path $saved 'browser-extension'
+          foreach ($folder in @($legacy,$savedLegacy)) {
+            New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            foreach ($name in @('manifest.json','background.js','content.js','pairing.json')) {
+              [IO.File]::WriteAllText((Join-Path $folder $name),'synthetic legacy fixture')
+            }
+          }
+          $unrelated = Join-Path $savedLegacy 'user-note.txt'
+          [IO.File]::WriteAllText($unrelated,'keep')
+          $session = Join-Path $saved 'billing-sessions/test-profile'
+          New-Item -ItemType Directory -Path $session -Force | Out-Null
+          [IO.File]::WriteAllText((Join-Path $session 'fixture.txt'),'keep')
+          $settings = Join-Path $target 'settings.json'
+          [IO.File]::WriteAllText($settings,'{"refreshMinutes":17}')
           & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path
           if (-not $?) { throw 'Installer upgrade failed' }
-          if ([IO.File]::ReadAllText($pairing) -cne $before) { throw 'Pairing changed on upgrade' }
+          if (Test-Path -LiteralPath $legacy) { throw 'Retired companion not removed' }
+          if (Test-Path -LiteralPath (Join-Path $savedLegacy 'pairing.json')) { throw 'Retired saved pairing not removed' }
+          if (-not (Test-Path -LiteralPath $unrelated)) { throw 'Unrelated file removed' }
+          if (-not (Test-Path -LiteralPath (Join-Path $session 'fixture.txt'))) { throw 'Billing Session profile removed on upgrade' }
+          if ((Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json).refreshMinutes -ne 17) { throw 'Settings changed on upgrade' }
           & ./installer/Uninstall-UsageDashboard.ps1 -PurgeCachedData
           if (-not $?) { throw 'Uninstaller failed' }
           if (Test-Path $target) { throw 'Plugin still installed' }

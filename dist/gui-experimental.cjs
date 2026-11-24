@@ -924,7 +924,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,browserBalance:null,zenBrowserBalance:null,billingSessions:[]});
+const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,billingSessions:[]});
 const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
 function sanitizeBillingSessions(value,accounts) {
   if(!Array.isArray(value))return [];
@@ -978,12 +978,6 @@ function sanitizeSnapshot(value) {
   }));
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
-  for(const field of ['browserBalance','zenBrowserBalance']){
-    const b=value[field];
-    if(b && b.currency==='USD' && typeof b.usd==='number' && Number.isFinite(b.usd)
-      && typeof b.observedAt==='number' && Number.isFinite(b.observedAt))
-      result[field]={usd:b.usd,currency:'USD',observedAt:b.observedAt,source:'billing-page'};
-  }
   result.billingSessions=sanitizeBillingSessions(value.billingSessions,result.accounts);
   return result;
 }
@@ -1038,7 +1032,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,browserBalance:previous.browserBalance,zenBrowserBalance:previous.zenBrowserBalance,billingSessions:previous.billingSessions});
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,billingSessions:previous.billingSessions});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -1047,15 +1041,6 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     return busy;
   }
   const cached=async()=>{await init();return sanitizeSnapshot(snapshot);};
-  const receiveBalance=async balance=>{
-    await init();
-    const field=balance.provider==='opencode'?'zenBrowserBalance':'browserBalance';
-    if(snapshot[field]?.observedAt>balance.observedAt)return sanitizeSnapshot(snapshot);
-    snapshot=sanitizeSnapshot({...snapshot,[field]:balance});
-    inform();
-    await write();
-    return snapshot;
-  };
   const setBillingSession=async(id,provider,session)=>{
     await init();
     if(!snapshot.accounts.some(a=>a.id===id&&a.provider===provider&&a.kind==='api'&&a.message!=='login_required'))return sanitizeSnapshot(snapshot);
@@ -1110,105 +1095,11 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     timer=setInterval(()=>void refresh(true),interval);timer.unref?.();
   };
   const stop=()=>{if(timer)clearInterval(timer);};
-  return {cached,refresh,receiveBalance,setBillingSession,markActive,syncActive,start,stop};
+  return {cached,refresh,setBillingSession,markActive,syncActive,start,stop};
 }
 module.exports={EMPTY,readInterval,sanitizeSnapshot,cacheDirectory,persistentMonitor};
 
 })(__cache,__cache.exports);
-const __bridge={exports:{}}; (function(module,exports){
-/*
- * Usage Dashboard
- * Copyright (c) 2026 ItanBlackwell.
- * SPDX-License-Identifier: MPL-2.0
- * Source: https://github.com/ItanBlackwell/usage-dashboard
- */
-'use strict';
-
-// Local-only receiver for a user-installed browser extension reading the
-// VISIBLE OpenAI Platform Billing page. No browser cookies, credentials,
-// HTML, URLs with query strings, or tokens are sent to the UI or persisted.
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const crypto = require('node:crypto');
-const { createServer } = require('node:http');
-
-const DEFAULT_PORT = 18746;
-const MINUTE = 60_000;
-const safePort = x => Number.isInteger(x) && x >= 1025 && x <= 65535 ? x : DEFAULT_PORT;
-function validBalance(x) {
-  return typeof x === 'number' && Number.isFinite(x) && x >= -1_000_000 && x <= 100_000_000;
-}
-function validPage(url,provider='codex') {
-  // Zen reports a fixed source marker, never the private workspace URL.
-  return provider==='codex'
-    ? url==='https://platform.openai.com/settings/organization/billing/overview'
-    : provider==='opencode'&&url==='https://opencode.ai/workspace/billing';
-}
-function secretEquals(actual, expected) {
-  if (!actual || !expected) return false;
-  const a = Buffer.from(actual, 'utf8'), b = Buffer.from(expected, 'utf8');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-function acceptableOrigin(origin) {
-  return typeof origin === 'string' && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
-}
-async function createBridge({ pairingPath, onBalance, onError = () => {}, now = () => Date.now() }) {
-  let config;
-  try { config = JSON.parse(await fs.readFile(pairingPath, 'utf8')); }
-  catch { return { available: false, close: async () => {} }; }
-  if (typeof config.token !== 'string' || config.token.length < 40 || typeof onBalance !== 'function')
-    return { available: false, close: async () => {} };
-  const port = safePort(config.port);
-  const server = createServer((request, response) => {
-    const origin = request.headers.origin;
-    const allowed = acceptableOrigin(origin);
-    const send = (code, body = '') => {
-      response.writeHead(code, { 'Content-Type':'text/plain; charset=utf-8',
-        'Cache-Control':'no-store', 'Vary':'Origin',
-        ...(allowed ? { 'Access-Control-Allow-Origin':origin } : {}) });
-      response.end(body);
-    };
-    if (!allowed || request.url !== '/v1/balance') return send(403);
-    if (request.method === 'OPTIONS') {
-      response.writeHead(204, {
-        'Access-Control-Allow-Origin':origin,
-        'Access-Control-Allow-Methods':'POST, OPTIONS',
-        'Access-Control-Allow-Headers':'content-type, x-pv-usage-token',
-        'Access-Control-Max-Age':'600', 'Cache-Control':'no-store' });
-      return response.end();
-    }
-    if (request.method !== 'POST') return send(405);
-    if (!secretEquals(request.headers['x-pv-usage-token'], config.token)) return send(403);
-    let input = '';
-    request.on('data', chunk => {
-      input += chunk.toString('utf8');
-      if (input.length > 1024) request.destroy();
-    });
-    request.on('end', () => {
-      let doc;
-      try { doc = JSON.parse(input); } catch { return send(400); }
-      const provider=doc?.provider??'codex';
-      if (!validBalance(doc?.balanceUsd) || doc.currency !== 'USD' || !validPage(doc.page,provider)) return send(422);
-      // ObservedAt is server time. Never trust browser-supplied timestamps.
-      void Promise.resolve(onBalance({ provider, usd:doc.balanceUsd, currency:'USD', observedAt:now(), source:'billing-page' }))
-        .then(() => send(204)).catch(() => send(500));
-    });
-  });
-  try {
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); });
-    });
-  } catch (error) {
-    onError(error?.code === 'EADDRINUSE' ? 'bridge_port_busy' : 'bridge_start_failed');
-    return { available:false, close:async()=>{} };
-  }
-  server.unref?.();
-  return { available:true, port, close: () => new Promise(resolve => server.close(() => resolve())) };
-}
-module.exports = { createBridge, validBalance, validPage, acceptableOrigin, secretEquals, DEFAULT_PORT, MINUTE };
-
-})(__bridge,__bridge.exports);
 const __billing={exports:{}}; (function(module,exports){
 /*
  * Usage Dashboard
@@ -1649,22 +1540,13 @@ function indicatorWindows(account) {
   }
   return result;
 }
-// Browser readings are workspace/organization scoped, not per-key balances.
-function browserBalanceFor(account,snapshot) {
-  if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
-  const keys=connectedApiKeys(snapshot).filter(a=>a.provider===account.provider);
-  if(keys.length!==1||keys[0].id!==account.id)return null;
-  const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
-  return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
-}
 function billingSessionFor(account,snapshot) {
   if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
   return (snapshot?.billingSessions||[]).find(s=>s.id===account.id&&s.provider===account.provider)||null;
 }
-function accountBrowserBalance(account,snapshot) {
+function billingSessionBalance(account,snapshot) {
   const s=billingSessionFor(account,snapshot);
-  if(s)return Number.isFinite(s.amount)?{usd:s.amount,currency:'USD',observedAt:s.checkedAt,source:'billing-session',state:s.state}:null;
-  return browserBalanceFor(account,snapshot);
+  return Number.isFinite(s?.amount)?{usd:s.amount,currency:'USD',observedAt:s.checkedAt,state:s.state}:null;
 }
 // Inventory-only metadata is not a new balance measurement. Retain previously
 // confirmed values only for the identical account while IPC is unavailable.
@@ -1680,18 +1562,12 @@ function mergeInventoryFallback(inventory,previous) {
     return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
       credits:p.credits,checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={...inventory,accounts,browserBalance:null,zenBrowserBalance:null,
+  const merged={accounts,organizations:inventory?.organizations||[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0,
     billingSessions:accounts.flatMap(a=>{
       const p=byId.get(a.id),s=billingSessionFor(a,previous);
       return p&&p.provider===a.provider&&p.kind===a.kind&&p.source===a.source&&p.message!=='login_required'&&s
         ?[{...s,state:Number.isFinite(s.amount)?'stale':s.state}]:[];
     })};
-  for(const [provider,field] of [['codex','browserBalance'],['opencode','zenBrowserBalance']]){
-    const keys=connectedApiKeys(merged).filter(a=>a.provider===provider);
-    const oldKeys=connectedApiKeys(previous).filter(a=>a.provider===provider);
-    if(keys.length===1&&oldKeys.length===1&&keys[0].id===oldKeys[0].id&&keys[0].source===oldKeys[0].source)
-      merged[field]=browserBalanceFor(oldKeys[0],previous);
-  }
   return merged;
 }
 function formatCurrency(amount,currency) {
@@ -1705,9 +1581,9 @@ function indicatorPresentation(account,snapshot) {
     // A key spending cap is NOT wallet money. Keep the ring unknown instead of
     // misrepresenting it as a prepaid balance.
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
-    // Billing credit is organization-wide: only attach it if exactly one
-    // OpenAI API account exists. Never attribute it to two unrelated keys.
-    const amount=accountBrowserBalance(account,snapshot)?.usd??null;
+    // Only an explicitly confirmed account-scoped Billing Session can
+    // supply a browser-derived balance.
+    const amount=billingSessionBalance(account,snapshot)?.usd??null;
     return {mode:'api',amount,currency:'USD'};
   }
   const windows=indicatorWindows(account);
@@ -1720,7 +1596,7 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,billingSessionFor,accountBrowserBalance,formatCurrency,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,billingSessionFor,billingSessionBalance,formatCurrency,mergeInventoryFallback };
 
 
 })(__presentation,__presentation.exports);
@@ -1904,7 +1780,6 @@ const { onCleanup, createEffect, createRoot } = require('solid-js');
 const core = __accounts.exports;
 const presentation = __presentation.exports;
 const cache = __cache.exports;
-const bridge = __bridge.exports;
 const billing = __billing.exports;
 const switchQueue = __switchQueue.exports;
 const nativeUpdate = __nativeUpdate.exports;
@@ -1919,10 +1794,9 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
   month:Schema.String,state:Schema.String,message:Schema.String,usdSpent:Schema.NullOr(Schema.Number),
   monthlyBudgetUsd:Schema.NullOr(Schema.Number),usdRemainingBudget:Schema.NullOr(Schema.Number),
   limitType:Schema.String,checkedAt:Schema.Number });
-const BalanceSchema = Schema.Struct({usd:Schema.Number,currency:Schema.String,observedAt:Schema.Number,source:Schema.String});
 const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,browserBalance:Schema.NullOr(BalanceSchema),zenBrowserBalance:Schema.NullOr(BalanceSchema),billingSessions:Schema.Array(BillingSessionSchema) });
+  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,billingSessions:Schema.Array(BillingSessionSchema) });
 const BillingActionResultSchema = Schema.Struct({accepted:Schema.Boolean,reason:Schema.NullOr(Schema.String),snapshot:SnapshotSchema});
 const Metrics = Ipc.define({id:'usage-dashboard.metrics',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema},billing:{input:Schema.Struct({id:Schema.String,action:Schema.String}),output:BillingActionResultSchema}}});
 
@@ -2190,7 +2064,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
     const session=presentation.billingSessionFor(account,data);
-    const balance=presentation.accountBrowserBalance(account,data);
+    const balance=presentation.billingSessionBalance(account,data);
     const display=hasOwn?currencyAmount(own.amount,own.currency):(balance?money(balance.usd):'—');
     accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:balance?.observedAt??null);
     const amountEl=card.querySelector('[data-pv-api-amount]');
@@ -2209,9 +2083,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
         no_usage_endpoint:['No supported balance endpoint.','Нет поддерживаемого API получения баланса.']
       };
       const reason=reasons[account.message]?.[ru?1:0];
-      const note=balance?(balance.source==='billing-session'
-        ?(balance.state==='ok'?(ru?'Подтверждённый баланс Billing-сессии.':'Confirmed billing session balance.'):(ru?'Последний подтверждённый баланс Billing-сессии.':'Last confirmed billing session balance.'))
-        :(ru?'Баланс из открытой страницы оплаты; проверьте соответствие аккаунта.':'Balance from the open billing page; verify the matching account.'))
+      const note=balance?(balance.state==='ok'?(ru?'Подтверждённый баланс Billing-сессии.':'Confirmed billing session balance.'):(ru?'Последний подтверждённый баланс Billing-сессии.':'Last confirmed billing session balance.'))
         :hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
         :['codex','opencode'].includes(account.provider)
           ?(ru?'Подключи Billing-сессию для этого API-аккаунта.':'Connect a billing session for this API account.')
@@ -2286,7 +2158,7 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),browserBalance:null,zenBrowserBalance:null,billingSessions:[]};
+    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),billingSessions:[]};
   }catch{return null;}
 }
 function createView(ctx,client,{compact=false}={}) {
@@ -2809,14 +2681,7 @@ exports.default=Plugin.define({
     };
     const activeTimer=setInterval(()=>void sync(),20000);activeTimer.unref?.();
     void sync();
-    // The optional Billing companion uses the same resolved installation.
-    // Failure to find it never affects account inventory, quota fetch or IPC.
-    const pairingPath=pluginFolder ? path.join(pluginFolder,'browser-extension','pairing.json') : null;
-    const receiver=pairingPath
-      ? bridge.createBridge({pairingPath,onBalance:store.receiveBalance}).catch(()=>({close:async()=>{}}))
-      : Promise.resolve({close:async()=>{}});
-
-    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();void billingService.stop().catch(()=>{});void receiver.then(server=>server.close()).catch(()=>{});};
+    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();void billingService.stop().catch(()=>{});};
   },
 });
 

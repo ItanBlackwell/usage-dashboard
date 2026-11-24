@@ -79,22 +79,13 @@ function indicatorWindows(account) {
   }
   return result;
 }
-// Browser readings are workspace/organization scoped, not per-key balances.
-function browserBalanceFor(account,snapshot) {
-  if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
-  const keys=connectedApiKeys(snapshot).filter(a=>a.provider===account.provider);
-  if(keys.length!==1||keys[0].id!==account.id)return null;
-  const b=account.provider==='codex'?snapshot?.browserBalance:snapshot?.zenBrowserBalance;
-  return b?.currency==='USD'&&Number.isFinite(b.usd)?b:null;
-}
 function billingSessionFor(account,snapshot) {
   if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
   return (snapshot?.billingSessions||[]).find(s=>s.id===account.id&&s.provider===account.provider)||null;
 }
-function accountBrowserBalance(account,snapshot) {
+function billingSessionBalance(account,snapshot) {
   const s=billingSessionFor(account,snapshot);
-  if(s)return Number.isFinite(s.amount)?{usd:s.amount,currency:'USD',observedAt:s.checkedAt,source:'billing-session',state:s.state}:null;
-  return browserBalanceFor(account,snapshot);
+  return Number.isFinite(s?.amount)?{usd:s.amount,currency:'USD',observedAt:s.checkedAt,state:s.state}:null;
 }
 // Inventory-only metadata is not a new balance measurement. Retain previously
 // confirmed values only for the identical account while IPC is unavailable.
@@ -110,18 +101,12 @@ function mergeInventoryFallback(inventory,previous) {
     return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
       credits:p.credits,checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={...inventory,accounts,browserBalance:null,zenBrowserBalance:null,
+  const merged={accounts,organizations:inventory?.organizations||[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0,
     billingSessions:accounts.flatMap(a=>{
       const p=byId.get(a.id),s=billingSessionFor(a,previous);
       return p&&p.provider===a.provider&&p.kind===a.kind&&p.source===a.source&&p.message!=='login_required'&&s
         ?[{...s,state:Number.isFinite(s.amount)?'stale':s.state}]:[];
     })};
-  for(const [provider,field] of [['codex','browserBalance'],['opencode','zenBrowserBalance']]){
-    const keys=connectedApiKeys(merged).filter(a=>a.provider===provider);
-    const oldKeys=connectedApiKeys(previous).filter(a=>a.provider===provider);
-    if(keys.length===1&&oldKeys.length===1&&keys[0].id===oldKeys[0].id&&keys[0].source===oldKeys[0].source)
-      merged[field]=browserBalanceFor(oldKeys[0],previous);
-  }
   return merged;
 }
 function formatCurrency(amount,currency) {
@@ -135,9 +120,9 @@ function indicatorPresentation(account,snapshot) {
     // A key spending cap is NOT wallet money. Keep the ring unknown instead of
     // misrepresenting it as a prepaid balance.
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
-    // Billing credit is organization-wide: only attach it if exactly one
-    // OpenAI API account exists. Never attribute it to two unrelated keys.
-    const amount=accountBrowserBalance(account,snapshot)?.usd??null;
+    // Only an explicitly confirmed account-scoped Billing Session can
+    // supply a browser-derived balance.
+    const amount=billingSessionBalance(account,snapshot)?.usd??null;
     return {mode:'api',amount,currency:'USD'};
   }
   const windows=indicatorWindows(account);
@@ -150,5 +135,5 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,browserBalanceFor,billingSessionFor,accountBrowserBalance,formatCurrency,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,billingSessionFor,billingSessionBalance,formatCurrency,mergeInventoryFallback };
 

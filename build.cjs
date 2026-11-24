@@ -13,12 +13,11 @@ const oldCore = fs.readFileSync(path.join(root,'src/core.cjs'),'utf8');
 const accounts = fs.readFileSync(path.join(root,'src/accounts.cjs'),'utf8');
 const gui = fs.readFileSync(path.join(root,'src/gui-entry.cjs'),'utf8');
 const cache = fs.readFileSync(path.join(root,'src/cache.cjs'),'utf8');
-const balanceBridge = fs.readFileSync(path.join(root,'src/balance-bridge.cjs'),'utf8');
 const billingSession = fs.readFileSync(path.join(root,'src/billing-session.cjs'),'utf8');
 const presentation = fs.readFileSync(path.join(root,'src/presentation.cjs'),'utf8');
 const switchQueue = fs.readFileSync(path.join(root,'src/switch-queue.cjs'),'utf8');
 const nativeUpdate = fs.readFileSync(path.join(root,'src/native-update-layout.cjs'),'utf8');
-if (!gui.includes("const billing = require('./billing-session.cjs');") || !gui.includes("const cache = require('./cache.cjs');") || !gui.includes("const bridge = require('./balance-bridge.cjs');") || !accounts.includes("const base = require('./core.cjs');") || !gui.includes("const core = require('./accounts.cjs');") || !gui.includes("const presentation = require('./presentation.cjs');") || !gui.includes("const switchQueue = require('./switch-queue.cjs');") || !gui.includes("const nativeUpdate = require('./native-update-layout.cjs');")) throw new Error('Unexpected module imports');
+if (!gui.includes("const billing = require('./billing-session.cjs');") || !gui.includes("const cache = require('./cache.cjs');") || !accounts.includes("const base = require('./core.cjs');") || !gui.includes("const core = require('./accounts.cjs');") || !gui.includes("const presentation = require('./presentation.cjs');") || !gui.includes("const switchQueue = require('./switch-queue.cjs');") || !gui.includes("const nativeUpdate = require('./native-update-layout.cjs');")) throw new Error('Unexpected module imports');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const sha = /^[0-9a-f]{40}$/i.test(process.env.GITHUB_SHA || '')
   ? process.env.GITHUB_SHA.toLowerCase() : 'local-build';
@@ -37,7 +36,6 @@ const text = banner + `'use strict';\n` +
   `const __old={exports:{}}; (function(module,exports){\n${oldCore}\n})(__old,__old.exports);\n` +
   `const __accounts={exports:{}}; (function(module,exports){\n${accounts.replace("const base = require('./core.cjs');",'const base = __old.exports;')}\n})(__accounts,__accounts.exports);\n` +
   `const __cache={exports:{}}; (function(module,exports){\n${cache}\n})(__cache,__cache.exports);\n` +
-  `const __bridge={exports:{}}; (function(module,exports){\n${balanceBridge}\n})(__bridge,__bridge.exports);\n` +
   `const __billing={exports:{}}; (function(module,exports){\n${billingSession}\n})(__billing,__billing.exports);\n` +
   `const __presentation={exports:{}}; (function(module,exports){\n${presentation}\n})(__presentation,__presentation.exports);\n` +
   `const __switchQueue={exports:{}}; (function(module,exports){\n${switchQueue}\n})(__switchQueue,__switchQueue.exports);\n` +
@@ -45,7 +43,6 @@ const text = banner + `'use strict';\n` +
   gui.replace("const core = require('./accounts.cjs');",'const core = __accounts.exports;')
      .replace("const presentation = require('./presentation.cjs');",'const presentation = __presentation.exports;')
      .replace("const cache = require('./cache.cjs');","const cache = __cache.exports;")
-     .replace("const bridge = require('./balance-bridge.cjs');","const bridge = __bridge.exports;")
      .replace("const billing = require('./billing-session.cjs');","const billing = __billing.exports;")
      .replace("const switchQueue = require('./switch-queue.cjs');","const switchQueue = __switchQueue.exports;")
      .replace("const nativeUpdate = require('./native-update-layout.cjs');","const nativeUpdate = __nativeUpdate.exports;") + '\n';

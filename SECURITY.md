@@ -24,13 +24,14 @@ and the potential impact. Redact all secrets and private account data.
   Provider pages return only a sanitized amount to the plugin. Browser
   authentication remains in private local browser storage, and private billing
   URLs remain in local bindings. Browser sandboxing is retained.
-- The optional billing extension communicates with a loopback-only listener
-  using a local pairing token created during installation.
-- No production pairing tokens, billing snapshots or environment secrets are
-  distributed with source or release archives.
+- Billing Session requires no browser extension, pairing token or local HTTP
+  receiver.
+- No billing snapshots, browser profiles or environment secrets are distributed
+  with source or release archives.
 - Quota integration endpoints may change or become unavailable without notice.
 
 ## Contributor hygiene
 
-Never commit `.env`, `pairing.json`, `settings.json`, local cache, access tokens
-isolated billing profiles, local bindings, or authenticated HTTP responses. Rotate any credential accidentally disclosed.
+Never commit `.env`, `settings.json`, local cache, access tokens, isolated
+billing profiles, local bindings, or authenticated HTTP responses. Rotate any
+credential accidentally disclosed.

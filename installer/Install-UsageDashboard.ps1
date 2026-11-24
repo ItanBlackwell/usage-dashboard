@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Source: https://github.com/ItanBlackwell/usage-dashboard
 [CmdletBinding()]
-param([string]$PackageRoot,[switch]$SetupBillingCompanion,[switch]$SkipBillingRuntime)
+param([string]$PackageRoot,[switch]$SkipBillingRuntime)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 try {
@@ -20,31 +20,25 @@ try {
     $plugins=Join-Path $root 'plugins'
     $target=Join-Path $plugins 'usage-dashboard'
     $old=Join-Path $plugins 'pv-usage-dashboard'
-    $extensions=Join-Path $target 'browser-extension'
     New-Item -ItemType Directory -Force -Path (Join-Path $target 'dist') | Out-Null
-    New-Item -ItemType Directory -Force -Path $extensions | Out-Null
     $copySafe = {
         param([string]$source,[string]$destination)
         if ((Test-Path -LiteralPath $source -PathType Leaf) -and -not (Test-Path -LiteralPath $destination)) {
             Copy-Item -LiteralPath $source -Destination $destination -ErrorAction Stop
         }
     }
-    # Keep local configuration and browser pairing when upgrading the old plugin.
+    # Keep local configuration when upgrading the old plugin.
     if (Confirm-PluginIdentity -Directory $old -Expected 'pv-usage-dashboard') {
         & $copySafe (Join-Path $old 'settings.json') (Join-Path $target 'settings.json')
-        & $copySafe (Join-Path $old 'browser-extension\pairing.json') (Join-Path $extensions 'pairing.json')
+        Remove-LegacyBillingCompanion -Directory $old
     }
     # Restore settings from a prior clean uninstall when no current settings exist.
     $saved=Join-Path $root '.usage-dashboard-userdata'
     & $copySafe (Join-Path $saved 'settings.json') (Join-Path $target 'settings.json')
-    & $copySafe (Join-Path $saved 'browser-extension\pairing.json') (Join-Path $extensions 'pairing.json')
     Copy-Item -LiteralPath $manifest -Destination (Join-Path $target 'package.json') -Force
     Copy-Item -LiteralPath $bundle -Destination (Join-Path $target 'dist\gui-experimental.cjs') -Force
-    foreach ($entry in @('manifest.json','background.js','content.js')) {
-        $src=Join-Path $PackageRoot "browser-extension\$entry"
-        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "Missing browser extension file: $entry" }
-        Copy-Item -LiteralPath $src -Destination (Join-Path $extensions $entry) -Force
-    }
+    Remove-LegacyBillingCompanion -Directory $target
+    Remove-LegacyBillingCompanion -Directory $saved
     if (-not $SkipBillingRuntime) {
         try {
             # npm lockfile v3 includes an empty root key, which Windows
@@ -110,14 +104,6 @@ try {
     if (-not (Test-Path -LiteralPath $settings)) {
         [IO.File]::WriteAllText($settings,'{"refreshMinutes":5}', [Text.UTF8Encoding]::new($false))
     }
-    $pairing=Join-Path $extensions 'pairing.json'
-    if (-not (Test-Path -LiteralPath $pairing)) {
-        $bytes = New-Object byte[] 32
-        $rng=[System.Security.Cryptography.RandomNumberGenerator]::Create()
-        try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-        $json=@{ port=18746; token=[Convert]::ToBase64String($bytes); refreshMinutes=15 } | ConvertTo-Json -Compress
-        [IO.File]::WriteAllText($pairing,$json,[Text.UTF8Encoding]::new($false))
-    }
     $cacheBase = if($env:LOCALAPPDATA){$env:LOCALAPPDATA}else{Join-Path $HOME '.cache'}
     $oldCache=Join-Path $cacheBase 'pv-usage-dashboard\snapshot.json'
     $newCacheDir=Join-Path $cacheBase 'usage-dashboard'
@@ -140,11 +126,7 @@ try {
     Write-Host "Usage Dashboard $($package.version) installed: $target" -ForegroundColor Green
     Write-Host 'Restart OpenCode Desktop. One plugin entry should appear in Settings > Extensions > Plugins.'
     Write-Host 'For OpenAI or Zen API balances, use Connect Billing in the Usage Dashboard popup.'
-    Write-Host "Optional legacy browser companion folder: $extensions"
-    if ($SetupBillingCompanion) {
-        try { Start-BillingCompanionSetup -ExtensionDirectory $extensions }
-        catch { Write-Warning 'Browser setup could not be completed. The plugin is installed; follow docs/BROWSER_EXTENSION.md manually.' }
-    }
+    Write-Host 'If previously loaded, remove the retired Usage Dashboard Billing extension from Edge or Chrome manually.'
 } catch {
     Write-Error "Usage Dashboard installation failed: $($_.Exception.Message)"
     exit 1

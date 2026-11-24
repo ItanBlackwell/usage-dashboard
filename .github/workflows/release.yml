@@ -35,6 +35,7 @@ jobs:
           $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
           if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing' }
           if (-not (Test-Path (Join-Path $target 'node_modules/playwright-core/package.json'))) { throw 'Billing runtime missing' }
+          if (Test-Path -LiteralPath (Join-Path $target 'browser-extension')) { throw 'Retired companion installed' }
           & ./installer/Uninstall-UsageDashboard.ps1 -PurgeCachedData
           if (Test-Path $target) { throw 'Uninstaller did not remove plugin' }
 
@@ -57,7 +58,7 @@ jobs:
       - name: Build and validate
         run: |
           set -e
-          for file in src/*.cjs browser-extension/*.js build.cjs; do node --check "$file"; done
+          for file in src/*.cjs build.cjs; do node --check "$file"; done
           node build.cjs
           node --check dist/gui-experimental.cjs
           python3 tools/make-distributions.py

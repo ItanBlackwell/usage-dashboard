@@ -1,6 +1,6 @@
 # Billing Session (OpenAI API and OpenCode Zen)
 
-Billing Session is the preferred optional way to read a visible prepaid USD
+Billing Session is the optional way to read a visible prepaid USD
 balance without a browser extension. It uses the installed Microsoft Edge
 browser first, or Google Chrome if Edge is absent, with a separate persistent
 browser profile for each connected API account. It does not use your normal
@@ -57,8 +57,8 @@ paths, URLs or authentication data.
   status and observation time distinguish it from a fresh reading.
 - **Disconnect** removes this account's dedicated profile and binding.
   If the browser is still open and removal fails, close it and retry.
-- The old extension remains an optional fallback for an unbound single
-  API account of a provider. See [Browser extension](BROWSER_EXTENSION.md).
+- The retired browser companion is not supported. Connect each API account
+  through Billing Session; older extension-derived balances are not reused.
 
 ## Privacy
 

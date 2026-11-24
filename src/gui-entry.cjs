@@ -15,7 +15,6 @@ const { onCleanup, createEffect, createRoot } = require('solid-js');
 const core = require('./accounts.cjs');
 const presentation = require('./presentation.cjs');
 const cache = require('./cache.cjs');
-const bridge = require('./balance-bridge.cjs');
 const billing = require('./billing-session.cjs');
 const switchQueue = require('./switch-queue.cjs');
 const nativeUpdate = require('./native-update-layout.cjs');
@@ -30,10 +29,9 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
   month:Schema.String,state:Schema.String,message:Schema.String,usdSpent:Schema.NullOr(Schema.Number),
   monthlyBudgetUsd:Schema.NullOr(Schema.Number),usdRemainingBudget:Schema.NullOr(Schema.Number),
   limitType:Schema.String,checkedAt:Schema.Number });
-const BalanceSchema = Schema.Struct({usd:Schema.Number,currency:Schema.String,observedAt:Schema.Number,source:Schema.String});
 const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,browserBalance:Schema.NullOr(BalanceSchema),zenBrowserBalance:Schema.NullOr(BalanceSchema),billingSessions:Schema.Array(BillingSessionSchema) });
+  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,billingSessions:Schema.Array(BillingSessionSchema) });
 const BillingActionResultSchema = Schema.Struct({accepted:Schema.Boolean,reason:Schema.NullOr(Schema.String),snapshot:SnapshotSchema});
 const Metrics = Ipc.define({id:'usage-dashboard.metrics',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema},billing:{input:Schema.Struct({id:Schema.String,action:Schema.String}),output:BillingActionResultSchema}}});
 
@@ -301,7 +299,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
     const session=presentation.billingSessionFor(account,data);
-    const balance=presentation.accountBrowserBalance(account,data);
+    const balance=presentation.billingSessionBalance(account,data);
     const display=hasOwn?currencyAmount(own.amount,own.currency):(balance?money(balance.usd):'—');
     accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:balance?.observedAt??null);
     const amountEl=card.querySelector('[data-pv-api-amount]');
@@ -320,9 +318,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
         no_usage_endpoint:['No supported balance endpoint.','Нет поддерживаемого API получения баланса.']
       };
       const reason=reasons[account.message]?.[ru?1:0];
-      const note=balance?(balance.source==='billing-session'
-        ?(balance.state==='ok'?(ru?'Подтверждённый баланс Billing-сессии.':'Confirmed billing session balance.'):(ru?'Последний подтверждённый баланс Billing-сессии.':'Last confirmed billing session balance.'))
-        :(ru?'Баланс из открытой страницы оплаты; проверьте соответствие аккаунта.':'Balance from the open billing page; verify the matching account.'))
+      const note=balance?(balance.state==='ok'?(ru?'Подтверждённый баланс Billing-сессии.':'Confirmed billing session balance.'):(ru?'Последний подтверждённый баланс Billing-сессии.':'Last confirmed billing session balance.'))
         :hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
         :['codex','opencode'].includes(account.provider)
           ?(ru?'Подключи Billing-сессию для этого API-аккаунта.':'Connect a billing session for this API account.')
@@ -397,7 +393,7 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),browserBalance:null,zenBrowserBalance:null,billingSessions:[]};
+    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),billingSessions:[]};
   }catch{return null;}
 }
 function createView(ctx,client,{compact=false}={}) {
@@ -920,13 +916,6 @@ exports.default=Plugin.define({
     };
     const activeTimer=setInterval(()=>void sync(),20000);activeTimer.unref?.();
     void sync();
-    // The optional Billing companion uses the same resolved installation.
-    // Failure to find it never affects account inventory, quota fetch or IPC.
-    const pairingPath=pluginFolder ? path.join(pluginFolder,'browser-extension','pairing.json') : null;
-    const receiver=pairingPath
-      ? bridge.createBridge({pairingPath,onBalance:store.receiveBalance}).catch(()=>({close:async()=>{}}))
-      : Promise.resolve({close:async()=>{}});
-
-    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();void billingService.stop().catch(()=>{});void receiver.then(server=>server.close()).catch(()=>{});};
+    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();void billingService.stop().catch(()=>{});};
   },
 });

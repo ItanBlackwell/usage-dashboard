@@ -30,8 +30,16 @@ See [Billing Session](BILLING_SESSION.md) for the complete instructions.
 The Portable ZIP contains the verified runtime archive. Source ZIP installation
 downloads it from npm and validates the locked SHA-512 hash. If the runtime
 is unavailable, the direct provider integrations still work.
-For legacy extension setup, explicitly run `Install.cmd -SetupBillingCompanion`
-and follow [Browser extension](BROWSER_EXTENSION.md).
+## Upgrading from the browser companion
+
+The old browser extension and its local HTTP receiver have been removed.
+Installation removes known obsolete companion files and pairing tokens from
+the active plugin and saved user-data directories. Existing Billing Session
+profiles, provider connections and settings are preserved. Old extension
+balances are discarded because they are not bound to a confirmed account.
+If the extension was loaded in Edge or Chrome, manually remove it from
+`edge://extensions` or `chrome://extensions`. The installer does not edit
+browser profiles or extension registrations.
 
 ## Uninstallation
 
@@ -39,8 +47,7 @@ Close OpenCode and double-click `Uninstall.cmd` from the extracted distribution.
 The uninstall preserves user settings and isolated billing profiles for a later
 reinstall. Disconnect billing sessions first or use the PowerShell uninstaller
 with `-PurgeCachedData` to remove the private profiles and metrics cache.
-If you loaded the Billing companion, remove it manually from the extensions
-page of the browser profile in which you installed it.
+
 
 ## If the plugin appears in Extensions but the icon is missing
 
@@ -63,16 +70,14 @@ providers' supported metrics.
 ## API balances
 
 Balances require specific provider APIs or, for OpenAI and OpenCode Zen prepaid
-balances, an authorized [Billing Session](BILLING_SESSION.md) or the legacy
-browser companion.
+balances, an authorized [Billing Session](BILLING_SESSION.md).
 Missing/unavailable metrics do **not** mean a $0 balance.
 
 If all API balances suddenly show dashes, refresh the popup and hover over an
 amount to see the reason. A plugin service warning indicates an IPC failure;
 previously confirmed values for the same account are retained when possible.
 For OpenRouter, a missing balance may also indicate missing key permissions or
-a failed provider request. For OpenAI and Zen, check the Billing Session status; if using the legacy
-extension, check its badge.
+a failed provider request. For OpenAI and Zen, check the Billing Session status.
 
 ## OpenCode and OpenCode Go
 
