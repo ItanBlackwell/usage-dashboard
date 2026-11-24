@@ -9,23 +9,17 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,billingSessions:[]});
-const BILLING_STATES=new Set(['connecting','awaiting_login','awaiting_login_window','awaiting_login_document','awaiting_login_tabs','awaiting_login_balance','awaiting_login_ready','awaiting_login_helper','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale','choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
-function sanitizeBillingSessions(value,accounts) {
-  if(!Array.isArray(value))return [];
-  const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
-  const result=new Map();
-  for(const s of value.slice(0,80)){
-    if(!s||typeof s.id!=='string'||eligible.get(s.id)!==s.provider||!BILLING_STATES.has(s.state))continue;
-    const valid=typeof s.amount==='number'&&Number.isFinite(s.amount)&&s.amount>=(s.provider==='opencode'?0:-1000000)&&s.amount<=100000000;
-    const amount=valid&&['ok','stale','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
-    const checkedAt=amount!==null&&Number.isFinite(s.checkedAt)&&s.checkedAt>0?s.checkedAt:0;
-    const safeId=id=>typeof id==='string'&&/^[a-z][a-z0-9-]{0,39}$/.test(id);
-    const browser=safeId(s.browser)?s.browser:null;
-    const browserChoices=Array.isArray(s.browserChoices)?[...new Set(s.browserChoices.filter(safeId))].slice(0,40):[];
-    result.set(s.id,{id:s.id,provider:s.provider,state:s.state,amount:checkedAt?amount:null,checkedAt,browser,browserChoices});
-  }
-  return [...result.values()];
+const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0});
+const BUDGET_MESSAGES=new Set(['experimental_budget','no_budgets','unauthorized','forbidden','rate_limited','request_failed','invalid_payload','invalid_balance','unsupported_console','workspace_required','credential_not_readable','login_expired','login_required','plugin_ipc_unavailable']);
+function sanitizeBudgets(value){
+  if(!Array.isArray(value)||value.length>100)return [];
+  const valid=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1e10;
+  return value.filter(b=>b&&valid(b.limitUsd)&&(b.spentUsd===null||valid(b.spentUsd))&&
+    ['each','combined'].includes(b.scope)&&['all','models'].includes(b.coverage)&&
+    ['set','model'].includes(b.per)&&typeof b.shared==='boolean'&&Number.isFinite(b.resetsAt)&&b.resetsAt>0)
+    .map(b=>({limitUsd:b.limitUsd,spentUsd:b.spentUsd,
+      remainingUsd:b.spentUsd===null?null:Math.max(0,b.limitUsd-b.spentUsd),
+      resetsAt:b.resetsAt,scope:b.scope,coverage:b.coverage,per:b.per,shared:b.shared}));
 }
 const readInterval = (value, fallback=5) => Number.isInteger(value) && value>=1 && value<=120 ? value : fallback;
 function cacheDirectory(env=process.env,home=os.homedir()) {
@@ -52,6 +46,8 @@ function sanitizeSnapshot(value) {
       remainingPercent:Number(w.remainingPercent)||0,
       resetsAt:Number.isFinite(w.resetsAt)?w.resetsAt:null,
     })):[],credits:Number.isFinite(a.credits)?a.credits:null,
+    budgets:a.provider==='opencode'&&a.kind==='api'?sanitizeBudgets(a.budgets):[],
+    budgetMessage:a.provider==='opencode'&&BUDGET_MESSAGES.has(a.budgetMessage)?a.budgetMessage:null,
     checkedAt:Number.isFinite(a.checkedAt)?a.checkedAt:0,
   }));
   if (Array.isArray(value.organizations)) result.organizations=value.organizations.slice(0,16).map(o=>({
@@ -66,7 +62,6 @@ function sanitizeSnapshot(value) {
   }));
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
-  result.billingSessions=sanitizeBillingSessions(value.billingSessions,result.accounts);
   return result;
 }
 function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,clock=Date.now,intervalMinutes=5,onChange=()=>{}}={}) {
@@ -108,7 +103,9 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
             const prev=prevById.get(a.id);
             if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length)
               return {...prev,state:'stale'};
-            if(a.state==='error' && !a.balance && prev?.balance &&
+            // Do not resurrect a Console balance from a different workspace
+            // or a previous permission grant after its current read failed.
+            if(a.provider!=='opencode' && a.state==='error' && !a.balance && prev?.balance &&
               prev.provider===a.provider && prev.kind===a.kind &&
               ['request_failed','rate_limited','invalid_payload','invalid_balance'].includes(a.message))
               return {...a,balance:prev.balance,balances:prev.balances,checkedAt:prev.checkedAt,state:'stale'};
@@ -120,7 +117,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,billingSessions:previous.billingSessions});
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -129,13 +126,6 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     return busy;
   }
   const cached=async()=>{await init();return sanitizeSnapshot(snapshot);};
-  const setBillingSession=async(id,provider,session)=>{
-    await init();
-    if(!snapshot.accounts.some(a=>a.id===id&&a.provider===provider&&a.kind==='api'&&a.message!=='login_required'))return sanitizeSnapshot(snapshot);
-    const remaining=snapshot.billingSessions.filter(s=>s.id!==id);
-    snapshot=sanitizeSnapshot({...snapshot,billingSessions:session?[...remaining,{...session,id,provider}]:remaining});
-    inform();await write();return sanitizeSnapshot(snapshot);
-  };
   // The server acknowledged activation. Update only the public active flags
   // immediately; quota refresh happens separately without blocking the popup.
   const markActive=async(id,provider)=>{
@@ -183,6 +173,6 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     timer=setInterval(()=>void refresh(true),interval);timer.unref?.();
   };
   const stop=()=>{if(timer)clearInterval(timer);};
-  return {cached,refresh,setBillingSession,markActive,syncActive,start,stop};
+  return {cached,refresh,markActive,syncActive,start,stop};
 }
 module.exports={EMPTY,readInterval,sanitizeSnapshot,cacheDirectory,persistentMonitor};

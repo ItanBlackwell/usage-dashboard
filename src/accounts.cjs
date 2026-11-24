@@ -45,6 +45,7 @@ const CLAUDE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const ANTHROPIC_COSTS_URL = 'https://api.anthropic.com/v1/organizations/analytics/cost';
 const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
 const OPENAI_SPEND_LIMIT_URL = 'https://api.openai.com/v1/organization/spend_limit';
+const OPENCODE_CONSOLE = 'https://opencode.ai/console';
 const MAX_ORGS = 12;
 const MAX_PAGES = 15;
 const MAX_ACCOUNTS = 60;
@@ -88,6 +89,11 @@ function keyFor(cred,conn,env,provider) {
   if(conn?.type==='env' && PROVIDER_ENV[provider]?.includes(conn.name)) return string(env?.[conn.name]);
   return null;
 }
+function consoleMetadata(credential){
+  const m=object(credential?.value?.metadata);
+  return {consoleServer:m?.server===undefined?null:typeof m.server==='string'?m.server:'invalid',
+    consoleOrg:m?.orgID===undefined?null:typeof m.orgID==='string'?m.orgID:'invalid'};
+}
 function accountIdMeta(metadata) {
   const m = object(metadata);
   return string(m?.accountId) || string(m?.account_id) || string(m?.chatgptAccountId) || string(m?.chatgpt_account_id) || null;
@@ -127,6 +133,7 @@ function collectAccounts(integrations, credentials, env = {}) {
       access: cred?.value?.type === 'oauth' ? string(cred.value.access) : null, apiKey,
       expires: timestamp(cred?.value?.expires), integrationID:conn.integrationID, account: accountIdMeta(cred?.value?.metadata),
       tokenMethod: cred?.value?.type || conn.method || conn.type,
+      ...(conn.provider==='opencode'?consoleMetadata(cred):{}),
       oauthMethod: string(cred?.value?.methodID),
       directSharing: Array.isArray(cred?.value?.metadata?.scopes) && cred.value.metadata.scopes.includes('chatgpt.tokens.use.direct'),
       externalMethod: string(cred?.value?.methodID),
@@ -142,6 +149,7 @@ function collectAccounts(integrations, credentials, env = {}) {
       access: cred.value?.type === 'oauth' ? string(cred.value.access) : null, apiKey:keyFor(cred,null,env,provider),
       expires: timestamp(cred.value?.expires), integrationID:cred.integrationID, account: accountIdMeta(cred.value?.metadata),
       tokenMethod: cred.value?.type || 'unknown',
+      ...(provider==='opencode'?consoleMetadata(cred):{}),
       oauthMethod: string(cred.value?.methodID),
       directSharing: Array.isArray(cred?.value?.metadata?.scopes) && cred.value.metadata.scopes.includes('chatgpt.tokens.use.direct'),
       externalMethod: string(cred.value?.methodID),
@@ -324,10 +332,87 @@ function parseOpenCodeGoUsage(body) {
   if (!windows.length) throw new Error('missing_windows');
   return {windows,credits:null};
 }
+// Experimental Console endpoints. The current-budgets contract is used by
+// OpenCode core's usage-limits service (packages/core/src/usage-limits.ts).
+// Keep separate budget policies rather than adding overlapping allowances.
+const isUsd=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1e10;
+function parseOpenCodeBudgets(body){
+  if(!Array.isArray(body)||body.length>100)throw new Error('invalid_payload');
+  const rows=[],seen=new Set();
+  for(const item of body){
+    if(!object(item)||typeof item.ruleID!=='string'||!item.ruleID||item.ruleID.length>160||
+      seen.has(item.ruleID)||!isUsd(item.limitDollars)||!isUsd(item.spentDollars)||
+      !['each','combined'].includes(item.scope)||!['set','model'].includes(item.per)||
+      !['all','models'].includes(item.coverage)||typeof item.shared!=='boolean'||
+      !Array.isArray(item.models)||item.models.length>2000||!Array.isArray(item.vendors)||
+      typeof item.resetsAt!=='string')throw new Error('invalid_payload');
+    const resetsAt=Date.parse(item.resetsAt);
+    if(!Number.isFinite(resetsAt)||resetsAt<=0)throw new Error('invalid_payload');
+    seen.add(item.ruleID);
+    let spent=item.spentDollars;
+    // Without a current model, report the most constrained explicitly
+    // reported model counter. Never fill in missing model spend as zero.
+    // An incomplete per-model policy is not an all-spend allowance.
+    if(item.per==='model'){
+      const observed=item.models.map(model=>model?.spentDollars);
+      if(!observed.length||observed.some(v=>!isUsd(v)))spent=null;
+      else spent=Math.max(...observed);
+    }
+    rows.push({limitUsd:item.limitDollars,spentUsd:spent,
+      remainingUsd:spent===null?null:Math.max(0,item.limitDollars-spent),
+      resetsAt,scope:item.scope,coverage:item.coverage,per:item.per,shared:item.shared});
+  }
+  return rows.sort((a,b)=>(a.remainingUsd??Infinity)-(b.remainingUsd??Infinity));
+}
+function parseOpenCodeCreditBalance(body){
+  // Microcents are decimal strings in the observed Console response.
+  // Invoiced credit lines and credit limits are not prepaid wallet money.
+  if(!object(body)||typeof body.billingMode!=='string')throw new Error('invalid_payload');
+  if(body.billingMode!=='prepaid')return null;
+  const raw=body.balanceMicroCents;
+  const micros=typeof raw==='string'&&/^\d{1,16}$/.test(raw)?Number(raw):raw;
+  if(!Number.isSafeInteger(micros)||micros<0)throw new Error('invalid_balance');
+  return validBalance(micros/100000000,'USD');
+}
+function openCodeConsoleHeaders(entry){
+  const server=entry.consoleServer;
+  // Legacy Console metadata maps path-for-path to the current official host.
+  // Never forward credentials to a self-hosted Console, gateway or redirect.
+  if(server!==null&&server!==undefined&&
+    !['https://opencode.ai/console','https://opencode.ai/console/','https://console.opencode.ai','https://console.opencode.ai/'].includes(server))
+    throw new Error('unsupported_console');
+  const oauth=entry.tokenMethod==='oauth';
+  const token=oauth?entry.access:entry.apiKey;
+  if(!token)throw new Error('credential_not_readable');
+  if(oauth&&entry.expires&&entry.expires<=Date.now()+10000)throw new Error('login_expired');
+  const org=entry.consoleOrg;
+  if(org!==null&&org!==undefined&&!/^(?:org|wrk)_[A-Za-z0-9_-]{1,120}$/.test(org))
+    throw new Error('workspace_required');
+  if(oauth&&!org)throw new Error('workspace_required');
+  return {Authorization:'Bearer '+token,Accept:'application/json',...(org?{'x-org-id':org}:{})};
+}
+async function queryOpenCodeConsole(entry,fetcher){
+  let headers;
+  try{headers=openCodeConsoleHeaders(entry);}
+  catch(e){return {state:'unavailable',message:e.message,budgetMessage:e.message,budgets:[]};}
+  // Independent reads: lack of Billing permission must not hide budgets,
+  // and lack of Budgets permission must not hide an actual prepaid balance.
+  const [budgets,billing]=await Promise.allSettled([
+    fetchSafe(OPENCODE_CONSOLE+'/api/policies/current-budgets',headers,fetcher).then(parseOpenCodeBudgets),
+    fetchSafe(OPENCODE_CONSOLE+'/api/billing/status',headers,fetcher).then(parseOpenCodeCreditBalance)
+  ]);
+  const rows=budgets.status==='fulfilled'?budgets.value:[];
+  const balance=billing.status==='fulfilled'?billing.value:null;
+  const budgetMessage=budgets.status==='fulfilled'?(rows.length?'experimental_budget':'no_budgets'):errorReason(budgets.reason);
+  const message=billing.status==='fulfilled'?(balance?'experimental_balance':'no_prepaid_balance'):errorReason(billing.reason);
+  return {state:budgets.status==='fulfilled'||billing.status==='fulfilled'?'ok':'error',
+    message,budgetMessage,budgets:rows,balance};
+}
 // Never send a stored provider token to user-supplied URLs, gateways, mirrors or
 // a different provider's hostname. The mapping here is deliberately fixed.
 async function queryAdditional(entry,fetcher){
-  if(['gemini','qwen','opencode'].includes(entry.provider))
+  if(entry.provider==='opencode')return queryOpenCodeConsole(entry,fetcher);
+  if(['gemini','qwen'].includes(entry.provider))
     return {state:'unavailable',message:'no_usage_endpoint'};
   const key=entry.apiKey || entry.access;
   if(!key)return {state:'unavailable',message:'credential_not_readable'};
@@ -380,13 +465,13 @@ async function queryAdditional(entry,fetcher){
 async function queryQuota(entry, fetcher = fetch, time = nowMs()) {
   const safe = { id: entry.id, provider: entry.provider, kind: entry.kind, label: entry.label,
     source: entry.source, active: entry.active, state:'unavailable', message:'quota_unavailable',
-    windows:[], credits:null, balance:null, balances:[], checkedAt:time };
+    windows:[], credits:null, balance:null, balances:[], budgets:[],budgetMessage:null,checkedAt:time };
   if (!['codex','claude'].includes(entry.provider)) {
-    if (entry.needsAuth) return {...safe,message:'login_required'};
+    if (entry.needsAuth) return {...safe,message:'login_required',budgetMessage:entry.provider==='opencode'?'login_required':null};
     try{return {...safe,...await queryAdditional(entry,fetcher)};}
     catch(e){return {...safe,state:'error',message:errorReason(e)};}
   }
-  if (entry.kind !== 'subscription') return { ...safe, message:'api_key_connected' };
+  if (entry.kind !== 'subscription') return { ...safe, message:entry.provider==='codex'?'no_usage_endpoint':'api_key_connected' };
   if (entry.needsAuth) return { ...safe, message:'login_required' };
   if (!entry.access) return { ...safe, message:'oauth_not_readable' };
   // The current 'Sign in with ChatGPT' token-sharing credential is scoped to
@@ -652,5 +737,5 @@ async function activateConnectedAccount({client,id,snapshot,force=false}={}) {
   return {id,provider:item.provider,unchanged:false};
 }
 
-module.exports={providerFor,parseDeepSeekBalance,parseDeepSeekBalances,parseKimiBalance,parseKimiCoding,parseOpenRouterKey,parseOpenRouterCredits,parseZaiQuota,parseMiniMaxQuota,parseOpenCodeGoUsage,queryAdditional,parseClaudeUsage,parseClaudeCostsPage,collectAccounts,readLocalCli,readAllAccounts,localSidecar,sidecarList,
+module.exports={providerFor,parseDeepSeekBalance,parseDeepSeekBalances,parseKimiBalance,parseKimiCoding,parseOpenRouterKey,parseOpenRouterCredits,parseZaiQuota,parseMiniMaxQuota,parseOpenCodeGoUsage,parseOpenCodeBudgets,parseOpenCodeCreditBalance,queryOpenCodeConsole,queryAdditional,parseClaudeUsage,parseClaudeCostsPage,collectAccounts,readLocalCli,readAllAccounts,localSidecar,sidecarList,
   readAllOrganizations,parseOrgConfigs,queryQuota,queryOrg,makeDashboardMonitor,activateConnectedAccount};

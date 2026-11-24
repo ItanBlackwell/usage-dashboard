@@ -18,47 +18,20 @@ The installer puts files into
 or an absolute `OPENCODE_CONFIG_DIR` if you configured one. Do not add a second
 plugin entry to `opencode.jsonc`: OpenCode automatically discovers the folder.
 
-## Billing Session setup
+## Upgrading and removal
 
-The default installer prepares the optional Playwright Core runtime but does
-not open a browser or install an extension. Use the **Connect Billing** button
-on the desired OpenAI or Zen API card after restarting OpenCode. Sign in
-manually in the separate normal browser window. New sessions use the Windows
-default browser if it is a recognized installed Chromium browser; otherwise,
-choose a detected compatible browser in the account card. Brave, Opera, Opera GX,
-Vivaldi and other Chromium derivatives are experimental. See the browser catalog
-in [Billing Session](BILLING_SESSION.md). Select the correct
-billing organization/workspace and open its Billing page. Select the organization
-or workspace that owns the connected API key. Usage Dashboard attempts to
-close the dedicated window automatically once the visible Billing page and
-balance are recognized. If the browser does not expose sufficient accessibility
-information, close its dedicated window manually. The plugin then discovers
-the page, reads the balance and completes the connection automatically.
-No URL input or separate confirmation is required.
-See [Billing Session](BILLING_SESSION.md) for the complete instructions.
+The installer no longer downloads or installs a browser runtime. It removes
+known obsolete companion files, pairing files, the former window helper and
+the retired plugin-owned runtime when its installation receipt is present.
+Existing settings, provider connections and unrelated files are preserved.
+Older private Billing profiles are not used and are not deleted on upgrade.
+Remove the retired companion from your browser's extension manager if you
+previously installed it.
 
-The Portable ZIP contains the verified runtime archive. Source ZIP installation
-downloads it from npm and validates the locked SHA-512 hash. If the runtime
-is unavailable, the direct provider integrations still work.
-
-## Upgrading from the browser companion
-
-The old browser extension and its local HTTP receiver have been removed.
-Installation removes known obsolete companion files and pairing tokens from
-the active plugin and saved user-data directories. Existing Billing Session
-profiles, provider connections and settings are preserved. Old extension
-balances are discarded because they are not bound to a confirmed account.
-If the extension was loaded in Edge or Chrome, manually remove it from
-`edge://extensions` or `chrome://extensions`. The installer does not edit
-browser profiles or extension registrations.
-
-## Uninstallation
-
-Close OpenCode and double-click `Uninstall.cmd` from the extracted distribution.
-The uninstall preserves user settings and isolated billing profiles for a later
-reinstall. Disconnect billing sessions first or use the PowerShell uninstaller
-with `-PurgeCachedData` to remove the private profiles and metrics cache.
-
+Close OpenCode and any remaining dedicated windows before upgrading. To
+uninstall, run `Uninstall.cmd`. Normal uninstall preserves settings and cache.
+The PowerShell uninstaller's `-PurgeCachedData` option also removes local plugin
+data, including retired private profiles. It is not required for the new version.
 
 ## If the plugin appears in Extensions but the icon is missing
 
@@ -80,24 +53,17 @@ providers' supported metrics.
 
 ## API balances
 
-Balances require specific provider APIs or, for OpenAI and OpenCode Zen prepaid
-balances, an authorized [Billing Session](BILLING_SESSION.md).
-Missing/unavailable metrics do **not** mean a $0 balance.
-
-If all API balances suddenly show dashes, refresh the popup and hover over an
-amount to see the reason. A plugin service warning indicates an IPC failure;
-previously confirmed values for the same account are retained when possible.
-For OpenRouter, a missing balance may also indicate missing key permissions or
-a failed provider request. For OpenAI and Zen, check the Billing Session status.
+Balances require supported provider APIs. Missing values do **not** mean a
+zero balance. Hover over an amount for the reason. For OpenAI API, actual
+prepaid credit balance is unavailable; configured Admin API keys still permit
+organization cost and budget reporting. Browser-derived balances are retired.
 
 ## OpenCode and OpenCode Go
 
 Connect the account in OpenCode's provider settings. OpenCode pay-as-you-go
-(also known as Zen) appears as an API account; its credit balance can be read
-from a supported, signed-in Billing page by Billing Session. Otherwise it is
-unknown. OpenCode Go appears as a subscription even
-when authenticated with an API key. It uses the official Go usage endpoint
-for 5-hour, weekly and monthly windows. If the endpoint denies access or
-returns no usable metrics, the connected account remains visible with unknown
-limits. Unconnected catalog entries are not displayed.
-
+(also known as Zen) appears as an API account. Its existing key or OAuth
+connection is used for [Console budgets and credits](OPENCODE_BUDGETS.md).
+No extra sign-in is required. If access is denied, the affected metric remains
+unknown. OpenCode Go appears as a subscription even when authenticated with
+an API key. Its official usage endpoint provides 5-hour, weekly and monthly
+windows. Connected accounts remain visible when usage is unavailable.

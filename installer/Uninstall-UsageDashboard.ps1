@@ -30,7 +30,7 @@ try {
         $saved=Join-Path $root '.usage-dashboard-userdata'
         if (Test-Path -LiteralPath $saved) { Remove-Item -LiteralPath $saved -Recurse -Force }
     }
-    if (-not $PurgeCachedData) { Write-Host 'Isolated Billing Session profiles retained for reinstall. Use -PurgeCachedData to remove them after closing the billing browser.' }
+    if (-not $PurgeCachedData) { Write-Host 'Local settings and cache retained. Use -PurgeCachedData to remove them, including any retired private Billing profiles.' }
     Write-Host 'If previously loaded, remove the retired Usage Dashboard Billing extension from Edge or Chrome manually.'
     Write-Host 'Restart OpenCode Desktop. Accounts and other plugins were not changed.'
 } catch {

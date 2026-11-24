@@ -86,3 +86,61 @@ function Remove-LegacyBillingCompanion {
         Write-Warning "Could not fully clean obsolete Billing companion files. Remove them manually after closing its browser: $folder"
     }
 }
+
+# Migration only: remove the installed runtime from the former Billing
+# implementation. A receipt and matching package identity are required.
+# Leave unknown dependencies and private user data untouched.
+function Remove-RetiredBillingRuntime {
+    param([Parameter(Mandatory)][string]$Directory)
+    if (-not (Confirm-PluginIdentity -Directory $Directory -Expected 'usage-dashboard')) { return }
+    try {
+        $root = Get-Item -LiteralPath $Directory -Force
+        if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+        $helperDir = Join-Path $Directory 'installer'
+        if (Test-Path -LiteralPath $helperDir -PathType Container) {
+            $item = Get-Item -LiteralPath $helperDir -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                $helper = Join-Path $helperDir 'BillingWindow.ps1'
+                if (Test-Path -LiteralPath $helper -PathType Leaf) {
+                    $file = Get-Item -LiteralPath $helper -Force
+                    if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                        Remove-Item -LiteralPath $helper -Force
+                    }
+                }
+                if (@(Get-ChildItem -LiteralPath $helperDir -Force).Count -eq 0) {
+                    Remove-Item -LiteralPath $helperDir -Force
+                }
+            }
+        }
+        $modules = Join-Path $Directory 'node_modules'
+        if (-not (Test-Path -LiteralPath $modules -PathType Container)) { return }
+        if (((Get-Item -LiteralPath $modules -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+        $runtime = Join-Path $modules 'playwright-core'
+        if (-not (Test-Path -LiteralPath $runtime -PathType Container)) { return }
+        if (((Get-Item -LiteralPath $runtime -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+        $receipt = Join-Path $runtime '.usage-dashboard-integrity'
+        $manifest = Join-Path $runtime 'package.json'
+        if (-not (Test-Path -LiteralPath $receipt -PathType Leaf) -or -not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return }
+        foreach ($file in @($receipt,$manifest)) {
+            if (((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+        }
+        if ((Get-Content -LiteralPath $receipt -Raw).Trim() -notmatch '^sha512-[A-Za-z0-9+/]+={0,2}$' -or
+            -not (Confirm-PluginIdentity -Directory $runtime -Expected 'playwright-core')) { return }
+        $pending = New-Object 'System.Collections.Generic.Stack[string]'
+        $pending.Push($runtime)
+        while ($pending.Count -gt 0) {
+            foreach ($entry in Get-ChildItem -LiteralPath ($pending.Pop()) -Force) {
+                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    Write-Warning 'Skipped retired runtime cleanup: reparse point found.'
+                    return
+                }
+                if ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
+            }
+        }
+        Remove-Item -LiteralPath $runtime -Recurse -Force
+        if (@(Get-ChildItem -LiteralPath $modules -Force).Count -eq 0) { Remove-Item -LiteralPath $modules -Force }
+        Write-Host 'Removed retired Billing runtime.'
+    } catch {
+        Write-Warning 'Could not completely remove the retired Billing runtime. Close OpenCode and retry installation.'
+    }
+}

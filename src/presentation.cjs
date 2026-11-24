@@ -79,13 +79,12 @@ function indicatorWindows(account) {
   }
   return result;
 }
-function billingSessionFor(account,snapshot) {
-  if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
-  return (snapshot?.billingSessions||[]).find(s=>s.id===account.id&&s.provider===account.provider)||null;
-}
-function billingSessionBalance(account,snapshot) {
-  const s=billingSessionFor(account,snapshot);
-  return Number.isFinite(s?.amount)?{usd:s.amount,currency:'USD',observedAt:s.checkedAt,state:s.state}:null;
+// Only all-spend, non-model-specific budgets can describe the remaining
+// general allowance. Overlapping policies constrain rather than add.
+function tightestGeneralBudget(account,now=Date.now()){
+  const rows=(account?.budgets||[]).filter(b=>b.coverage==='all'&&b.per==='set'&&
+    Number.isFinite(b.remainingUsd)&&b.remainingUsd>=0&&Number.isFinite(b.resetsAt)&&b.resetsAt>now);
+  return rows.reduce((best,b)=>!best||b.remainingUsd<best.remainingUsd?b:best,null);
 }
 // Inventory-only metadata is not a new balance measurement. Retain previously
 // confirmed values only for the identical account while IPC is unavailable.
@@ -96,17 +95,14 @@ function mergeInventoryFallback(inventory,previous) {
   const accounts=current.map(a=>{
     const p=byId.get(a.id);
     if(!p||p.provider!==a.provider||p.kind!==a.kind||p.source!==a.source||p.message==='login_required')return a;
-    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits);
+    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits)||(p.budgets||[]).length;
     if(!known)return a;
     return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
-      credits:p.credits,checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
+      credits:p.credits,budgets:(p.budgets||[]).filter(b=>b.resetsAt>Date.now()),
+      budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
+      checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={accounts,organizations:inventory?.organizations||[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0,
-    billingSessions:accounts.flatMap(a=>{
-      const p=byId.get(a.id),s=billingSessionFor(a,previous);
-      return p&&p.provider===a.provider&&p.kind===a.kind&&p.source===a.source&&p.message!=='login_required'&&s
-        ?[{...s,state:Number.isFinite(s.amount)?'stale':s.state}]:[];
-    })};
+  const merged={accounts,organizations:inventory?.organizations||[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
   return merged;
 }
 function formatCurrency(amount,currency) {
@@ -120,10 +116,9 @@ function indicatorPresentation(account,snapshot) {
     // A key spending cap is NOT wallet money. Keep the ring unknown instead of
     // misrepresenting it as a prepaid balance.
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
-    // Only an explicitly confirmed account-scoped Billing Session can
-    // supply a browser-derived balance.
-    const amount=billingSessionBalance(account,snapshot)?.usd??null;
-    return {mode:'api',amount,currency:'USD'};
+    const budget=tightestGeneralBudget(account);
+    if(budget)return {mode:'api',amount:budget.remainingUsd,currency:'USD',metric:'budget'};
+    return {mode:'api',amount:null,currency:'USD'};
   }
   const windows=indicatorWindows(account);
   if(windows.fiveHour!==null && windows.weekly!==null)return {
@@ -135,5 +130,5 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,billingSessionFor,billingSessionBalance,formatCurrency,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,formatCurrency,mergeInventoryFallback };
 

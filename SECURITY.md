@@ -19,42 +19,20 @@ and the potential impact. Redact all secrets and private account data.
 
 - Provider credentials remain in the OpenCode host process; GUI receives only
   sanitized usage metadata.
-- Billing Session uses dedicated per-account browser profiles, never a user's
-  existing browser profile. Manual login takes place in an ordinary browser
-  with no Playwright or debugging connection. The initial Connect Billing action
-  authorizes automatic completion for the selected API account, including
-  graceful closure of the dedicated login window once Billing is recognized.
-  Only after the dedicated browser exits are headless reads attempted. The user
-  must select the matching organization or workspace in the browser. Billing page
-  discovery uses read-only navigation records of the dedicated profile and
-  restricts the results to allowlisted provider Billing URLs from the current
-  login attempt. Missing or ambiguous page discovery fails closed rather than
-  selecting a different account. It does not read personal profiles, credentials,
-  saved passwords or encrypted session files. Authentication remains in
-  private local browser storage. The canonical Billing URL is retained in a
-  local binding, not the renderer or metrics cache.
-  No automated sign-in, credential extraction or verification bypass is used.
-  Provider pages return only a sanitized amount; browser sandboxing is retained.
-- The Windows window helper verifies the spawned PID, executable, start time
-  and exact dedicated profile argument before inspecting its accessibility
-  tree. It requires a single window and tab, a recognized loaded Billing URL
-  and explicit balance, and rechecks the window and ownership before invoking
-  WindowPattern.Close. No keyboard/mouse injection, forced browser termination,
-  global browser inspection or sign-in interaction is performed. If evidence
-  is insufficient, the window stays open. Only the dedicated browser receives
-  Chromium's standard accessibility-mode flag. The helper is invoked without a
-  shell, with a restricted environment and bounded execution time. Diagnostics
-  expose fixed reason codes, never raw accessibility text or browser output.
-- Browser selection reads the current user's HTTPS association without changing
-  it. Only recognized browser identifiers and executable basenames are accepted.
-  A local executable may be located through known installation directories or
-  validated Windows registration values. Registry command strings and their
-  arguments are never executed, and the browser is launched without a shell.
-  Detected executable paths stay in the main process and private local binding,
-  not the renderer or metrics cache.
-- Billing Session requires no browser extension, pairing token or local HTTP
-  receiver.
-- No billing snapshots, browser profiles or environment secrets are distributed
+- OpenCode Console budget and prepaid credit reads use only the existing
+  credential belonging to the corresponding connected account. OAuth requests
+  require its selected workspace ID; key requests use the key's own workspace.
+  Requests are read-only GETs to fixed official HTTPS endpoints with redirects
+  disabled. Custom Console origins are refused, and old official Console
+  metadata is mapped to the current official host. No credentials, workspace
+  identifiers, policy IDs or raw responses are persisted or sent to the renderer.
+- Budget and balance permission failures are handled independently. Missing
+  values remain unknown; overlapping budgets are never summed. Invoiced
+  credit lines are not reported as prepaid money.
+- No browser automation, profile inspection, extension, pairing token or
+  separate Billing IPC service remains. Old private profile files are not
+  accessed. Migration removes known retired installed components only.
+- No private snapshots, browser profiles or environment secrets are distributed
   with source or release archives.
 - Quota integration endpoints may change or become unavailable without notice.
 

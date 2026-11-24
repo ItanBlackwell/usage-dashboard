@@ -18,3 +18,4 @@ dist/*.map
 .env
 .env.*
 !*.example
+.usage-dashboard-legacy-backups/

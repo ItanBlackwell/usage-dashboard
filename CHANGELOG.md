@@ -2,55 +2,21 @@
 
 ## 0.13.0 (unreleased)
 
-- Improve Billing balance detection for nested markup, localized credit labels
-  and fractional USD balances. Allow slow provider pages to finish loading.
-  Enable standard Chromium accessibility for the dedicated login window,
-  handle nested frame documents, and distinguish window and balance failures
-  using sanitized diagnostic codes.
-
-- Automatically close the dedicated Billing login window on Windows when a
-  stable, unambiguous Billing document and balance are visible. Verify process
-  and profile ownership, request a graceful UI Automation close, and retain
-  manual closure when accessibility information is insufficient.
-
-- Complete Billing connection automatically after the dedicated login browser
-  exits. Remove manual URL input and confirmation controls, retain manual
-  provider authentication, and reject missing or ambiguous navigation records.
-  Handle missed browser-exit notifications and bounded transient retries.
-
-- Expand Billing browser detection to 26 Chromium browser variants, including
-  Brave, Opera GX, Opera, Vivaldi, Chromium and preview channels. Prefer the
-  current Windows default HTTPS browser for new sessions, offer detected
-  alternatives and preserve the selected browser of confirmed sessions.
-  Nonstandard Chromium derivatives are experimental.
-
-- Separate ordinary-browser authorization from headless Billing reads. Require
-  manual login and closure of the dedicated login profile. Complete connection
-  automatically without automating OAuth or security verification.
-
-- Isolate Billing commands in a versioned IPC contract, acknowledge commands
-  before launching the browser, and report transport-stage error codes.
-
-- Remove the browser companion and local HTTP balance receiver. Use only direct
-  provider APIs and account-scoped Billing Sessions. Clean obsolete installed
-  files and discard unbound cached balances on upgrade.
-
-- Report Billing action failures explicitly, retry incomplete account inventory,
-  retain safe UI diagnostics across popup lifetimes and constrain Billing
-  buttons to compact 18-pixel controls.
-
-- Fix Billing runtime installation on Windows PowerShell 5.1 by using a flat
-  runtime pin validated against the npm lockfile during packaging.
-
-- Add extension-free, account-scoped Billing Session for OpenAI API and OpenCode
-  Zen with manual login, background refresh, reconnection and profile removal.
-- Prepare an integrity-pinned Playwright Core runtime in Portable installation.
+- Read OpenCode Console budget policies and prepaid credit balances directly
+  with existing provider credentials, independently handling permissions.
+  Show separate budget scope, remaining allowance and reset times; do not sum
+  overlapping limits or treat invoiced credit as prepaid money.
+- Remove browser-based financial data acquisition, including Billing Session,
+  the browser companion, Playwright dependency, native window helper, command
+  IPC, browser cache fields and obsolete controls. Clean known installed
+  runtime files during upgrade without deleting private user profiles.
+- Restore dependency-free Portable and Source packaging; validate API parsing,
+  account isolation, cache sanitation and Windows installation migration.
 
 - Preserve confirmed account metrics during temporary plugin IPC fallback and
   incomplete credential inventory responses. Show safe balance error reasons.
 
-- Correct missing USD symbol in the generated bundle and support the current
-  OpenCode Console billing route.
+- Correct missing USD symbol in the generated bundle.
 
 - Preserve confirmed API balances, including zero, during temporary request failures.
 
@@ -58,7 +24,7 @@
   quota windows from the official usage API, without guessing missing balances.
 
 - Release the project as open source under the Mozilla Public License 2.0.
-- Document installation, GUI layout support, Billing Session and security reporting.
+- Document installation, GUI layout support, OpenCode budget metrics and security reporting.
 - Add issue templates, contributor guidance and code of conduct.
 - Split PR/commit validation from tag-triggered release publication.
 - Add CI static checks and Windows installer/uninstaller smoke checks.

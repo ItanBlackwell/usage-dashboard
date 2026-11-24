@@ -41,36 +41,22 @@ an installed plugin but no indicator appears, check the layout and restart.
 
 See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
 
-### Enable OpenAI and OpenCode Zen API balances (without an extension)
+### OpenCode Console budgets and credits
 
-The installer prepares the optional Billing Session runtime. A new session
-uses the current Windows default browser if it is a recognized installed
-Chromium browser. The browser catalog includes Edge, Chrome, Brave, Opera,
-Opera GX, Vivaldi, Chromium, Yandex Browser and additional Chromium derivatives,
-including several preview channels. Non-Edge/Chrome browsers are experimental.
-If the default is unsupported or unavailable, choose an installed compatible
-browser in the account card. Existing sessions retain their saved browser.
-No Developer mode or browser extension is necessary.
-**Manual authorization is still required:**
+Existing OpenCode pay-as-you-go connections are queried automatically. No
+additional sign-in, key, browser session or extension is required by the plugin.
+The experimental Console integration reads applicable budget policies and, when
+permitted, the workspace prepaid credit balance. These are distinct metrics;
+overlapping budget policies are not added together. The sidebar shows a prepaid
+balance when available, otherwise the tightest applicable general budget with an
+amber ring and a budget tooltip.
 
-1. Restart OpenCode and click **Connect Billing** on the OpenAI API or Zen API card.
-2. In the separate normal browser window, sign in yourself (including Google
-   sign-in if offered by the provider). Select the matching organization or
-   workspace and open its Billing page.
-3. Verify that the selected billing organization or workspace owns the API key.
-   On Windows, the dedicated browser window closes automatically when its
-   visible Billing page and balance can be recognized reliably. If automatic
-   closure is unavailable, close the dedicated window yourself.
-   The plugin then reads the balance and completes the connection automatically.
-   No URL input or confirmation in the popup is required.
+If the existing connection lacks permissions, the affected metric remains
+unavailable. An empty budget response is not a zero allowance. OpenAI API
+prepaid credit balances are not exposed by a supported public API; the
+organization Costs API remains available with a configured Admin API key.
 
-Only after manual sign-in is complete does the plugin attempt automated,
-headless balance reads using that isolated session. Authentication is never
-performed by Playwright.
-If login expires, reconnect manually. The experimental page reader may fail if
-the provider changes its site. See [Billing Session setup](docs/BILLING_SESSION.md).
-The previous browser companion is no longer supported. If you installed it
-before, remove it from Edge or Chrome using the browser's extensions page.
+See [OpenCode budgets and credits](docs/OPENCODE_BUDGETS.md).
 
 ## Compatibility and limits
 
@@ -85,8 +71,7 @@ before, remove it from Edge or Chrome using the browser's extensions page.
   and authorization method.
 - OpenCode Go uses the [official usage endpoint](https://opencode.ai/docs/console/go/#usage)
   for 5-hour, weekly and monthly limits. Connected OpenCode pay-as-you-go
-  accounts are displayed even when their credit balance is unavailable; Billing Session
-  can read a visible workspace credit balance.
+  accounts are displayed even when budgets or prepaid credits are unavailable.
 - Confirmed zero balances are displayed with two decimal places and currency.
 - Missing data is shown as unavailable, never assumed to mean a zero balance.
   Temporary provider errors preserve the last confirmed API balance.
@@ -100,8 +85,8 @@ before, remove it from Edge or Chrome using the browser's extensions page.
   requests, preventing stale updates from overriding the latest click.
 - Cached, refreshed usage summaries. Account credentials stay in the host
   process and are never passed to the GUI or saved in the usage cache.
-- Optional [Billing Session](docs/BILLING_SESSION.md) with separate per-account
-  browser profiles for OpenAI and OpenCode Zen.
+- Automatic [OpenCode Console budget and credit monitoring](docs/OPENCODE_BUDGETS.md)
+  through existing provider credentials, subject to permissions.
 
 
 ## Community and feedback
@@ -113,8 +98,8 @@ before, remove it from Edge or Chrome using the browser's extensions page.
 
 ## Development and contributions
 
-Requirements for building from source: Node.js 22+, Python 3 and network access
-for the integrity-checked Billing runtime archive.
+Requirements for building from source: Node.js 22+ and Python 3.
+No additional npm packages or network downloads are needed for packaging.
 
 ```sh
 node build.cjs
@@ -133,9 +118,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the
 
 Usage Dashboard communicates with connected provider endpoints to obtain
 available usage data; it is not an official product of OpenCode or the AI
-providers it integrates with. Billing Session uses dedicated local browser
-profiles and does not require an extension or a local HTTP receiver.
-Do not share tokens, isolated billing profiles or cached private information.
+providers it integrates with. It does not launch browsers, inspect browser
+profiles, or require extensions or an HTTP receiver for financial metrics.
+Do not share credentials or cached private information.
 
 Copyright (c) 2026 ItanBlackwell. Licensed under MPL-2.0.
 See [LICENSE](LICENSE) and [NOTICE](NOTICE).

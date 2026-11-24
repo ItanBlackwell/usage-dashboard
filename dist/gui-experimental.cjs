@@ -301,6 +301,7 @@ const CLAUDE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const ANTHROPIC_COSTS_URL = 'https://api.anthropic.com/v1/organizations/analytics/cost';
 const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
 const OPENAI_SPEND_LIMIT_URL = 'https://api.openai.com/v1/organization/spend_limit';
+const OPENCODE_CONSOLE = 'https://opencode.ai/console';
 const MAX_ORGS = 12;
 const MAX_PAGES = 15;
 const MAX_ACCOUNTS = 60;
@@ -344,6 +345,11 @@ function keyFor(cred,conn,env,provider) {
   if(conn?.type==='env' && PROVIDER_ENV[provider]?.includes(conn.name)) return string(env?.[conn.name]);
   return null;
 }
+function consoleMetadata(credential){
+  const m=object(credential?.value?.metadata);
+  return {consoleServer:m?.server===undefined?null:typeof m.server==='string'?m.server:'invalid',
+    consoleOrg:m?.orgID===undefined?null:typeof m.orgID==='string'?m.orgID:'invalid'};
+}
 function accountIdMeta(metadata) {
   const m = object(metadata);
   return string(m?.accountId) || string(m?.account_id) || string(m?.chatgptAccountId) || string(m?.chatgpt_account_id) || null;
@@ -383,6 +389,7 @@ function collectAccounts(integrations, credentials, env = {}) {
       access: cred?.value?.type === 'oauth' ? string(cred.value.access) : null, apiKey,
       expires: timestamp(cred?.value?.expires), integrationID:conn.integrationID, account: accountIdMeta(cred?.value?.metadata),
       tokenMethod: cred?.value?.type || conn.method || conn.type,
+      ...(conn.provider==='opencode'?consoleMetadata(cred):{}),
       oauthMethod: string(cred?.value?.methodID),
       directSharing: Array.isArray(cred?.value?.metadata?.scopes) && cred.value.metadata.scopes.includes('chatgpt.tokens.use.direct'),
       externalMethod: string(cred?.value?.methodID),
@@ -398,6 +405,7 @@ function collectAccounts(integrations, credentials, env = {}) {
       access: cred.value?.type === 'oauth' ? string(cred.value.access) : null, apiKey:keyFor(cred,null,env,provider),
       expires: timestamp(cred.value?.expires), integrationID:cred.integrationID, account: accountIdMeta(cred.value?.metadata),
       tokenMethod: cred.value?.type || 'unknown',
+      ...(provider==='opencode'?consoleMetadata(cred):{}),
       oauthMethod: string(cred.value?.methodID),
       directSharing: Array.isArray(cred?.value?.metadata?.scopes) && cred.value.metadata.scopes.includes('chatgpt.tokens.use.direct'),
       externalMethod: string(cred.value?.methodID),
@@ -580,10 +588,87 @@ function parseOpenCodeGoUsage(body) {
   if (!windows.length) throw new Error('missing_windows');
   return {windows,credits:null};
 }
+// Experimental Console endpoints. The current-budgets contract is used by
+// OpenCode core's usage-limits service (packages/core/src/usage-limits.ts).
+// Keep separate budget policies rather than adding overlapping allowances.
+const isUsd=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1e10;
+function parseOpenCodeBudgets(body){
+  if(!Array.isArray(body)||body.length>100)throw new Error('invalid_payload');
+  const rows=[],seen=new Set();
+  for(const item of body){
+    if(!object(item)||typeof item.ruleID!=='string'||!item.ruleID||item.ruleID.length>160||
+      seen.has(item.ruleID)||!isUsd(item.limitDollars)||!isUsd(item.spentDollars)||
+      !['each','combined'].includes(item.scope)||!['set','model'].includes(item.per)||
+      !['all','models'].includes(item.coverage)||typeof item.shared!=='boolean'||
+      !Array.isArray(item.models)||item.models.length>2000||!Array.isArray(item.vendors)||
+      typeof item.resetsAt!=='string')throw new Error('invalid_payload');
+    const resetsAt=Date.parse(item.resetsAt);
+    if(!Number.isFinite(resetsAt)||resetsAt<=0)throw new Error('invalid_payload');
+    seen.add(item.ruleID);
+    let spent=item.spentDollars;
+    // Without a current model, report the most constrained explicitly
+    // reported model counter. Never fill in missing model spend as zero.
+    // An incomplete per-model policy is not an all-spend allowance.
+    if(item.per==='model'){
+      const observed=item.models.map(model=>model?.spentDollars);
+      if(!observed.length||observed.some(v=>!isUsd(v)))spent=null;
+      else spent=Math.max(...observed);
+    }
+    rows.push({limitUsd:item.limitDollars,spentUsd:spent,
+      remainingUsd:spent===null?null:Math.max(0,item.limitDollars-spent),
+      resetsAt,scope:item.scope,coverage:item.coverage,per:item.per,shared:item.shared});
+  }
+  return rows.sort((a,b)=>(a.remainingUsd??Infinity)-(b.remainingUsd??Infinity));
+}
+function parseOpenCodeCreditBalance(body){
+  // Microcents are decimal strings in the observed Console response.
+  // Invoiced credit lines and credit limits are not prepaid wallet money.
+  if(!object(body)||typeof body.billingMode!=='string')throw new Error('invalid_payload');
+  if(body.billingMode!=='prepaid')return null;
+  const raw=body.balanceMicroCents;
+  const micros=typeof raw==='string'&&/^\d{1,16}$/.test(raw)?Number(raw):raw;
+  if(!Number.isSafeInteger(micros)||micros<0)throw new Error('invalid_balance');
+  return validBalance(micros/100000000,'USD');
+}
+function openCodeConsoleHeaders(entry){
+  const server=entry.consoleServer;
+  // Legacy Console metadata maps path-for-path to the current official host.
+  // Never forward credentials to a self-hosted Console, gateway or redirect.
+  if(server!==null&&server!==undefined&&
+    !['https://opencode.ai/console','https://opencode.ai/console/','https://console.opencode.ai','https://console.opencode.ai/'].includes(server))
+    throw new Error('unsupported_console');
+  const oauth=entry.tokenMethod==='oauth';
+  const token=oauth?entry.access:entry.apiKey;
+  if(!token)throw new Error('credential_not_readable');
+  if(oauth&&entry.expires&&entry.expires<=Date.now()+10000)throw new Error('login_expired');
+  const org=entry.consoleOrg;
+  if(org!==null&&org!==undefined&&!/^(?:org|wrk)_[A-Za-z0-9_-]{1,120}$/.test(org))
+    throw new Error('workspace_required');
+  if(oauth&&!org)throw new Error('workspace_required');
+  return {Authorization:'Bearer '+token,Accept:'application/json',...(org?{'x-org-id':org}:{})};
+}
+async function queryOpenCodeConsole(entry,fetcher){
+  let headers;
+  try{headers=openCodeConsoleHeaders(entry);}
+  catch(e){return {state:'unavailable',message:e.message,budgetMessage:e.message,budgets:[]};}
+  // Independent reads: lack of Billing permission must not hide budgets,
+  // and lack of Budgets permission must not hide an actual prepaid balance.
+  const [budgets,billing]=await Promise.allSettled([
+    fetchSafe(OPENCODE_CONSOLE+'/api/policies/current-budgets',headers,fetcher).then(parseOpenCodeBudgets),
+    fetchSafe(OPENCODE_CONSOLE+'/api/billing/status',headers,fetcher).then(parseOpenCodeCreditBalance)
+  ]);
+  const rows=budgets.status==='fulfilled'?budgets.value:[];
+  const balance=billing.status==='fulfilled'?billing.value:null;
+  const budgetMessage=budgets.status==='fulfilled'?(rows.length?'experimental_budget':'no_budgets'):errorReason(budgets.reason);
+  const message=billing.status==='fulfilled'?(balance?'experimental_balance':'no_prepaid_balance'):errorReason(billing.reason);
+  return {state:budgets.status==='fulfilled'||billing.status==='fulfilled'?'ok':'error',
+    message,budgetMessage,budgets:rows,balance};
+}
 // Never send a stored provider token to user-supplied URLs, gateways, mirrors or
 // a different provider's hostname. The mapping here is deliberately fixed.
 async function queryAdditional(entry,fetcher){
-  if(['gemini','qwen','opencode'].includes(entry.provider))
+  if(entry.provider==='opencode')return queryOpenCodeConsole(entry,fetcher);
+  if(['gemini','qwen'].includes(entry.provider))
     return {state:'unavailable',message:'no_usage_endpoint'};
   const key=entry.apiKey || entry.access;
   if(!key)return {state:'unavailable',message:'credential_not_readable'};
@@ -636,13 +721,13 @@ async function queryAdditional(entry,fetcher){
 async function queryQuota(entry, fetcher = fetch, time = nowMs()) {
   const safe = { id: entry.id, provider: entry.provider, kind: entry.kind, label: entry.label,
     source: entry.source, active: entry.active, state:'unavailable', message:'quota_unavailable',
-    windows:[], credits:null, balance:null, balances:[], checkedAt:time };
+    windows:[], credits:null, balance:null, balances:[], budgets:[],budgetMessage:null,checkedAt:time };
   if (!['codex','claude'].includes(entry.provider)) {
-    if (entry.needsAuth) return {...safe,message:'login_required'};
+    if (entry.needsAuth) return {...safe,message:'login_required',budgetMessage:entry.provider==='opencode'?'login_required':null};
     try{return {...safe,...await queryAdditional(entry,fetcher)};}
     catch(e){return {...safe,state:'error',message:errorReason(e)};}
   }
-  if (entry.kind !== 'subscription') return { ...safe, message:'api_key_connected' };
+  if (entry.kind !== 'subscription') return { ...safe, message:entry.provider==='codex'?'no_usage_endpoint':'api_key_connected' };
   if (entry.needsAuth) return { ...safe, message:'login_required' };
   if (!entry.access) return { ...safe, message:'oauth_not_readable' };
   // The current 'Sign in with ChatGPT' token-sharing credential is scoped to
@@ -908,7 +993,7 @@ async function activateConnectedAccount({client,id,snapshot,force=false}={}) {
   return {id,provider:item.provider,unchanged:false};
 }
 
-module.exports={providerFor,parseDeepSeekBalance,parseDeepSeekBalances,parseKimiBalance,parseKimiCoding,parseOpenRouterKey,parseOpenRouterCredits,parseZaiQuota,parseMiniMaxQuota,parseOpenCodeGoUsage,queryAdditional,parseClaudeUsage,parseClaudeCostsPage,collectAccounts,readLocalCli,readAllAccounts,localSidecar,sidecarList,
+module.exports={providerFor,parseDeepSeekBalance,parseDeepSeekBalances,parseKimiBalance,parseKimiCoding,parseOpenRouterKey,parseOpenRouterCredits,parseZaiQuota,parseMiniMaxQuota,parseOpenCodeGoUsage,parseOpenCodeBudgets,parseOpenCodeCreditBalance,queryOpenCodeConsole,queryAdditional,parseClaudeUsage,parseClaudeCostsPage,collectAccounts,readLocalCli,readAllAccounts,localSidecar,sidecarList,
   readAllOrganizations,parseOrgConfigs,queryQuota,queryOrg,makeDashboardMonitor,activateConnectedAccount};
 
 })(__accounts,__accounts.exports);
@@ -924,23 +1009,17 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
-const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,billingSessions:[]});
-const BILLING_STATES=new Set(['connecting','awaiting_login','awaiting_login_window','awaiting_login_document','awaiting_login_tabs','awaiting_login_balance','awaiting_login_ready','awaiting_login_helper','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale','choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
-function sanitizeBillingSessions(value,accounts) {
-  if(!Array.isArray(value))return [];
-  const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
-  const result=new Map();
-  for(const s of value.slice(0,80)){
-    if(!s||typeof s.id!=='string'||eligible.get(s.id)!==s.provider||!BILLING_STATES.has(s.state))continue;
-    const valid=typeof s.amount==='number'&&Number.isFinite(s.amount)&&s.amount>=(s.provider==='opencode'?0:-1000000)&&s.amount<=100000000;
-    const amount=valid&&['ok','stale','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
-    const checkedAt=amount!==null&&Number.isFinite(s.checkedAt)&&s.checkedAt>0?s.checkedAt:0;
-    const safeId=id=>typeof id==='string'&&/^[a-z][a-z0-9-]{0,39}$/.test(id);
-    const browser=safeId(s.browser)?s.browser:null;
-    const browserChoices=Array.isArray(s.browserChoices)?[...new Set(s.browserChoices.filter(safeId))].slice(0,40):[];
-    result.set(s.id,{id:s.id,provider:s.provider,state:s.state,amount:checkedAt?amount:null,checkedAt,browser,browserChoices});
-  }
-  return [...result.values()];
+const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0});
+const BUDGET_MESSAGES=new Set(['experimental_budget','no_budgets','unauthorized','forbidden','rate_limited','request_failed','invalid_payload','invalid_balance','unsupported_console','workspace_required','credential_not_readable','login_expired','login_required','plugin_ipc_unavailable']);
+function sanitizeBudgets(value){
+  if(!Array.isArray(value)||value.length>100)return [];
+  const valid=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1e10;
+  return value.filter(b=>b&&valid(b.limitUsd)&&(b.spentUsd===null||valid(b.spentUsd))&&
+    ['each','combined'].includes(b.scope)&&['all','models'].includes(b.coverage)&&
+    ['set','model'].includes(b.per)&&typeof b.shared==='boolean'&&Number.isFinite(b.resetsAt)&&b.resetsAt>0)
+    .map(b=>({limitUsd:b.limitUsd,spentUsd:b.spentUsd,
+      remainingUsd:b.spentUsd===null?null:Math.max(0,b.limitUsd-b.spentUsd),
+      resetsAt:b.resetsAt,scope:b.scope,coverage:b.coverage,per:b.per,shared:b.shared}));
 }
 const readInterval = (value, fallback=5) => Number.isInteger(value) && value>=1 && value<=120 ? value : fallback;
 function cacheDirectory(env=process.env,home=os.homedir()) {
@@ -967,6 +1046,8 @@ function sanitizeSnapshot(value) {
       remainingPercent:Number(w.remainingPercent)||0,
       resetsAt:Number.isFinite(w.resetsAt)?w.resetsAt:null,
     })):[],credits:Number.isFinite(a.credits)?a.credits:null,
+    budgets:a.provider==='opencode'&&a.kind==='api'?sanitizeBudgets(a.budgets):[],
+    budgetMessage:a.provider==='opencode'&&BUDGET_MESSAGES.has(a.budgetMessage)?a.budgetMessage:null,
     checkedAt:Number.isFinite(a.checkedAt)?a.checkedAt:0,
   }));
   if (Array.isArray(value.organizations)) result.organizations=value.organizations.slice(0,16).map(o=>({
@@ -981,7 +1062,6 @@ function sanitizeSnapshot(value) {
   }));
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
-  result.billingSessions=sanitizeBillingSessions(value.billingSessions,result.accounts);
   return result;
 }
 function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,clock=Date.now,intervalMinutes=5,onChange=()=>{}}={}) {
@@ -1023,7 +1103,9 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
             const prev=prevById.get(a.id);
             if(a.state!=='ok' && (!Array.isArray(a.windows)||!a.windows.length) && prev?.windows?.length)
               return {...prev,state:'stale'};
-            if(a.state==='error' && !a.balance && prev?.balance &&
+            // Do not resurrect a Console balance from a different workspace
+            // or a previous permission grant after its current read failed.
+            if(a.provider!=='opencode' && a.state==='error' && !a.balance && prev?.balance &&
               prev.provider===a.provider && prev.kind===a.kind &&
               ['request_failed','rate_limited','invalid_payload','invalid_balance'].includes(a.message))
               return {...a,balance:prev.balance,balances:prev.balances,checkedAt:prev.checkedAt,state:'stale'};
@@ -1035,7 +1117,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,billingSessions:previous.billingSessions});
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -1044,13 +1126,6 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     return busy;
   }
   const cached=async()=>{await init();return sanitizeSnapshot(snapshot);};
-  const setBillingSession=async(id,provider,session)=>{
-    await init();
-    if(!snapshot.accounts.some(a=>a.id===id&&a.provider===provider&&a.kind==='api'&&a.message!=='login_required'))return sanitizeSnapshot(snapshot);
-    const remaining=snapshot.billingSessions.filter(s=>s.id!==id);
-    snapshot=sanitizeSnapshot({...snapshot,billingSessions:session?[...remaining,{...session,id,provider}]:remaining});
-    inform();await write();return sanitizeSnapshot(snapshot);
-  };
   // The server acknowledged activation. Update only the public active flags
   // immediately; quota refresh happens separately without blocking the popup.
   const markActive=async(id,provider)=>{
@@ -1098,989 +1173,11 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     timer=setInterval(()=>void refresh(true),interval);timer.unref?.();
   };
   const stop=()=>{if(timer)clearInterval(timer);};
-  return {cached,refresh,setBillingSession,markActive,syncActive,start,stop};
+  return {cached,refresh,markActive,syncActive,start,stop};
 }
 module.exports={EMPTY,readInterval,sanitizeSnapshot,cacheDirectory,persistentMonitor};
 
 })(__cache,__cache.exports);
-const __billing={exports:{}}; (function(module,exports){
-/*
- * Usage Dashboard
- * Copyright (c) 2026 ItanBlackwell.
- * SPDX-License-Identifier: MPL-2.0
- * Source: https://github.com/ItanBlackwell/usage-dashboard
- */
-'use strict';
-
-// Main-process-only, opt-in billing sessions. Never attach to a user's normal
-// browser profile or expose a debugging port. Manual login runs in a normal
-// browser process; Playwright is used only for post-login billing reads.
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const crypto = require('node:crypto');
-const PROVIDERS = new Set(['codex','opencode']);
-const BROWSERS = Object.freeze({
-  msedge: {name:'Microsoft Edge',prog:['MSEdgeHTM'],exe:'msedge.exe',dirs:['Microsoft/Edge/Application'],pw:'msedge'},
-  chrome: {name:'Google Chrome',prog:['ChromeHTML'],exe:'chrome.exe',dirs:['Google/Chrome/Application'],pw:'chrome'},
-  brave: {name:'Brave',prog:['BraveHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser/Application']},
-  opera: {name:'Opera',prog:['OperaStable'],exe:'opera.exe',dirs:['Opera','Programs/Opera']},
-  'opera-gx': {name:'Opera GX',prog:['OperaGXStable'],exe:'opera.exe',dirs:['Opera GX','Programs/Opera GX']},
-  vivaldi: {name:'Vivaldi',prog:['VivaldiHTM','VivaldiHTML'],exe:'vivaldi.exe',dirs:['Vivaldi/Application','Programs/Vivaldi/Application']},
-  chromium: {name:'Chromium',prog:['ChromiumHTM','ChromiumHTML'],exe:'chrome.exe',dirs:['Chromium/Application','Chromium','Programs/Chromium/Application']},
-  yandex: {name:'Yandex Browser',prog:['YandexHTML','YandexBrowserHTML'],exe:'browser.exe',dirs:['Yandex/YandexBrowser/Application']},
-  'msedge-beta': {name:'Edge Beta',prog:['MSEdgeBHTML'],exe:'msedge.exe',dirs:['Microsoft/Edge Beta/Application'],pw:'msedge-beta'},
-  'msedge-dev': {name:'Edge Dev',prog:['MSEdgeDHTML'],exe:'msedge.exe',dirs:['Microsoft/Edge Dev/Application'],pw:'msedge-dev'},
-  'msedge-canary': {name:'Edge Canary',prog:['MSEdgeSSHTM'],exe:'msedge.exe',dirs:['Microsoft/Edge SxS/Application'],pw:'msedge-canary'},
-  'chrome-beta': {name:'Chrome Beta',prog:['ChromeBHTML'],exe:'chrome.exe',dirs:['Google/Chrome Beta/Application'],pw:'chrome-beta'},
-  'chrome-dev': {name:'Chrome Dev',prog:['ChromeDHTML'],exe:'chrome.exe',dirs:['Google/Chrome Dev/Application'],pw:'chrome-dev'},
-  'chrome-canary': {name:'Chrome Canary',prog:['ChromeSSHTM'],exe:'chrome.exe',dirs:['Google/Chrome SxS/Application'],pw:'chrome-canary'},
-  'brave-beta': {name:'Brave Beta',prog:['BraveBHTML','BraveBetaHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser-Beta/Application']},
-  'brave-dev': {name:'Brave Dev',prog:['BraveDHTML','BraveDevHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser-Dev/Application']},
-  'brave-nightly': {name:'Brave Nightly',prog:['BraveNHTML','BraveNightlyHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser-Nightly/Application']},
-  'opera-beta': {name:'Opera Beta',prog:['OperaNext','OperaBeta'],exe:'opera.exe',dirs:['Opera beta','Programs/Opera beta']},
-  'opera-developer': {name:'Opera Developer',prog:['OperaDeveloper'],exe:'opera.exe',dirs:['Opera developer','Programs/Opera developer']},
-  'vivaldi-snapshot': {name:'Vivaldi Snapshot',prog:['VivaldiSnapshotHTM'],exe:'vivaldi.exe',dirs:['Vivaldi Snapshot/Application','VivaldiSnapshot/Application']},
-  thorium: {name:'Thorium',prog:['ThoriumHTM','ThoriumHTML'],exe:'thorium.exe',dirs:['Thorium/Application','Thorium','Programs/Thorium/Application']},
-  slimjet: {name:'Slimjet',prog:['SlimjetHTML','SlimjetHTM'],exe:'slimjet.exe',dirs:['Slimjet']},
-  cent: {name:'Cent Browser',prog:['CentBrowserHTML','CentBrowserHTM'],exe:'chrome.exe',dirs:['CentBrowser/Application']},
-  'coc-coc': {name:'Coc Coc',prog:['CocCocHTML','CocCocHTM'],exe:'browser.exe',dirs:['CocCoc/Browser/Application']},
-  'avast-secure': {name:'Avast Secure Browser',prog:['AvastHTML','AvastSecureBrowserHTML'],exe:'AvastBrowser.exe',dirs:['AVAST Software/Browser/Application']},
-  'avg-secure': {name:'AVG Secure Browser',prog:['AVGHTML','AVGSecureBrowserHTML'],exe:'AVGBrowser.exe',dirs:['AVG/Browser/Application']}
-});
-const CHANNELS = Object.keys(BROWSERS);
-const ACTIONS = ['open','open_edge',...CHANNELS.map(id=>'open_'+id),'disconnect'];
-const CHOICE_STATES = ['choose_edge','choose_chrome','choose_browser'];
-const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
-const STATES = ['connecting','awaiting_login','awaiting_login_window','awaiting_login_document','awaiting_login_tabs','awaiting_login_balance','awaiting_login_ready','awaiting_login_helper','checking_billing','awaiting_confirmation','confirmation_unavailable','ok','stale',
-  'choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','billing_label_missing','billing_value_missing','billing_value_ambiguous','billing_read_failed','billing_navigation_failed','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
-
-function billingPage(provider,raw) {
-  try {
-    if(typeof raw!=='string'||raw.length>512)return null;
-    const u=new URL(raw);
-    if(u.username||u.password)return null;
-    if(provider==='codex'&&u.origin==='https://platform.openai.com'&&
-      /^\/settings\/organization\/billing\/overview\/?$/.test(u.pathname)){
-      // Preserve an explicitly selected organization only if the parameter is
-      // a recognizable non-secret organization ID; discard all other parameters.
-      const org=u.searchParams.get('organization')||u.searchParams.get('org');
-      return ENTRY.codex+(org&&/^org[-_][A-Za-z0-9_-]{1,120}$/.test(org)?'?organization='+encodeURIComponent(org):'');
-    }
-    if(provider==='opencode'&&u.origin==='https://opencode.ai'&&
-      /^\/(?:workspace\/[A-Za-z0-9_-]+\/billing|(?:console\/)?[A-Za-z0-9_-]+\/settings\/billing)\/?$/.test(u.pathname))
-      return u.origin+u.pathname.replace(/\/$/,'');
-  }catch{}
-  return null;
-}
-// Navigation discovery is limited to the user-authorized dedicated profile,
-// after the ordinary login window closes. Never query the personal browser,
-// Cookies, Login Data, authentication URLs, page titles or browsing contents.
-const WINDOWS_EPOCH_US=11644473600000000n;
-const MAX_DISCOVERY_BYTES=16*1024*1024;
-const visitCutoff=ms=>BigInt(Math.floor(ms))*1000n+WINDOWS_EPOCH_US;
-const billingPatterns=provider=>provider==='codex'
-  ?['https://platform.openai.com/settings/organization/billing/overview*']
-  :provider==='opencode'
-    ?['https://opencode.ai/workspace/*/billing*','https://opencode.ai/*/settings/billing*']:[];
-
-// Chromium stores its ordinary history in SQLite. Only URLs of candidate
-// billing pages visited during this login attempt are returned by the query.
-// Reference: Chromium history_database.cc and url_database.cc.
-function historyBillingPages(file,provider,since,loadSQLite=()=>require('node:sqlite')){
-  const patterns=billingPatterns(provider);
-  if(!patterns.length)return [];
-  const {DatabaseSync}=loadSQLite();
-  const db=new DatabaseSync(file,{readOnly:true,allowExtension:false});
-  try{
-    db.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=250;');
-    const query='SELECT url FROM urls WHERE last_visit_time>=? AND length(url)<=512 AND ('+
-      patterns.map(()=>'url GLOB ?').join(' OR ')+') LIMIT 65';
-    const rows=db.prepare(query).all(visitCutoff(since),...patterns);
-    if(rows.length>=65)return null; // truncated evidence is ambiguous
-    return [...new Set(rows.map(row=>billingPage(provider,row.url)).filter(Boolean))];
-  }finally{db.close();}
-}
-
-// Fallback for unencrypted Chromium session files, if the host lacks SQLite
-// or this browser's History format cannot be read. Parse only the URL field
-// of UpdateTabNavigation records; never decode titles, serialized page state,
-// other record types, or encrypted session storage. The file format is
-// described by Chromium SessionCommand and SerializedNavigationEntry.
-function navigationTimestamp(buffer,pickle,end,length){
-  // Skip length-delimited fields without decoding them. The serialized
-  // navigation timestamp prevents restored entries from an earlier login
-  // being mistaken for visits made in this attempt.
-  let pos=pickle+16+Math.ceil(length/4)*4;
-  const skipString=unit=>{
-    if(pos+4>end)return false;
-    const n=buffer.readInt32LE(pos);
-    if(n<0||n>(end-pos-4)/unit)return false;
-    pos+=4+Math.ceil(n*unit/4)*4;
-    return pos<=end;
-  };
-  const skip=n=>{pos+=n;return pos<=end;};
-  if(!skipString(2)||!skipString(1)||!skip(8)||!skipString(1)||!skip(4)||
-    !skipString(1)||!skip(4)||pos+8>end)return null;
-  return buffer.readBigInt64LE(pos);
-}
-function sessionBillingPages(buffer,provider,since){
-  if(!Buffer.isBuffer(buffer)||buffer.length<8||buffer.length>MAX_DISCOVERY_BYTES||
-    buffer.toString('ascii',0,4)!=='SNSS'||![1,3].includes(buffer.readUInt32LE(4)))return null;
-  if(!Number.isFinite(since)||since<=0)return null;
-  const cutoff=visitCutoff(since);
-  const prefix=Buffer.from(provider==='codex'?'https://platform.openai.com/settings/organization/billing/overview':'https://opencode.ai/');
-  const pages=new Set();
-  for(let offset=8;offset<buffer.length;){
-    if(offset+3>buffer.length)return null;
-    const size=buffer.readUInt16LE(offset),start=offset+2,end=start+size;
-    if(size<1||end>buffer.length)return null;
-    if(buffer[start]===6&&size>=17){
-      const pickle=start+1;
-      const payloadSize=buffer.readUInt32LE(pickle);
-      const length=buffer.readInt32LE(pickle+12);
-      if(payloadSize===size-5&&length>0&&length<=512&&pickle+16+length<=end){
-        // Decode only candidate URLs under the expected provider origin.
-        if(length>=prefix.length&&buffer.subarray(pickle+16,pickle+16+prefix.length).equals(prefix)){
-          const url=billingPage(provider,buffer.toString('utf8',pickle+16,pickle+16+length));
-          if(url){
-            const timestamp=navigationTimestamp(buffer,pickle,end,length);
-            if(timestamp===null)return null;
-            if(timestamp>=cutoff)pages.add(url);
-          }
-          if(pages.size>1)return [...pages];
-        }
-      }
-    }
-    offset=end;
-  }
-  return [...pages];
-}
-async function plainFile(io,root,file,maxSize){
-  try{
-    const stat=await io.lstat(file);
-    if(!stat.isFile()||stat.isSymbolicLink()||stat.size>maxSize)return false;
-    const actual=await io.realpath(file),rel=path.relative(root,actual);
-    return !!rel&&!path.isAbsolute(rel)&&rel!=='..'&&!rel.startsWith('..'+path.sep);
-  }catch{return false;}
-}
-async function discoverBillingPage({provider,profilePath,dedicatedDirectory,since,io=fs,loadSQLite}={}){
-  if(!PROVIDERS.has(provider)||!Number.isFinite(since)||since<=0)return {state:'billing_page_unavailable'};
-  let root;
-  try{
-    const st=await io.lstat(profilePath);
-    if(!st.isDirectory()||st.isSymbolicLink())return {state:'billing_page_unavailable'};
-    root=await io.realpath(profilePath);
-    if(dedicatedDirectory){
-      const base=await io.realpath(dedicatedDirectory);
-      const expected=path.relative(dedicatedDirectory,profilePath);
-      const actual=path.relative(base,root);
-      // Reject a junction/symlink redirecting a hashed account directory
-      // into another profile, even when the final directory itself is normal.
-      if(!expected||path.isAbsolute(expected)||expected==='..'||expected.startsWith('..'+path.sep)||
-        actual!==expected)return {state:'billing_page_unavailable'};
-    }
-  }catch{return {state:'billing_page_unavailable'};}
-  const pages=new Set();
-  let readable=false,uncertain=false;
-  // Chromium and its derivatives use either Default or the user-data root
-  // itself. No traversal into arbitrary profiles or user's personal history.
-  const profiles=[path.join(root,'Default'),root];
-  for(const dir of profiles){
-    const file=path.join(dir,'History');
-    if(!await plainFile(io,root,file,128*1024*1024))continue;
-    try{
-      const found=historyBillingPages(file,provider,since,loadSQLite);
-      if(found===null){uncertain=true;continue;}
-      readable=true;
-      for(const url of found)pages.add(url);
-    }catch{}
-  }
-  if(uncertain||pages.size>1)return {state:'billing_page_ambiguous'};
-  if(readable)return pages.size===1?{state:'page_detected',url:[...pages][0]}:{state:'billing_page_missing'};
-  // Recent session files only; no older session restore files and no decryption.
-  // The filename is a timestamp in microseconds since the Windows epoch.
-  for(const dir of profiles){
-    const sessions=path.join(dir,'Sessions');
-    let entries;
-    try{
-      const st=await io.lstat(sessions),real=await io.realpath(sessions);
-      const rel=path.relative(root,real);
-      if(!st.isDirectory()||st.isSymbolicLink()||!rel||path.isAbsolute(rel)||rel==='..'||rel.startsWith('..'+path.sep))continue;
-      entries=await io.readdir(sessions);
-    }catch{continue;}
-    const cutoff=visitCutoff(since);
-    const files=entries.filter(name=>/^Session_\d{15,20}$/.test(name)&&BigInt(name.slice(8))>=cutoff).sort();
-    if(files.length>8){uncertain=true;continue;}
-    for(const name of files){
-      const file=path.join(sessions,name);
-      if(!await plainFile(io,root,file,MAX_DISCOVERY_BYTES))continue;
-      try{
-        const bytes=await io.readFile(file);
-        const found=sessionBillingPages(bytes,provider,since);
-        if(found===null){uncertain=true;continue;}
-        readable=true;
-        for(const url of found)pages.add(url);
-      }catch{}
-    }
-  }
-  if(pages.size>1)return {state:'billing_page_ambiguous'};
-  if(uncertain)return {state:'billing_page_unavailable'};
-  return pages.size===1?{state:'page_detected',url:[...pages][0]}:{state:readable?'billing_page_missing':'billing_page_unavailable'};
-}
-function eligible(account) {
-  return account?.kind==='api'&&PROVIDERS.has(account.provider)&&typeof account.id==='string'&&
-    account.id.length>0&&account.id.length<=120&&account.message!=='login_required'&&account.message!=='plugin_ipc_unavailable';
-}
-// Runs inside the provider page. Only a finite USD amount and fixed
-// diagnostic code leave the document; never HTML, raw text or account data.
-function readBillingAmount(input) {
-  const provider=typeof input==='string'?input:input?.provider;
-  const diagnostic=typeof input==='object'&&input?.diagnostic===true;
-  const norm=x=>String(x??'').replace(/\s+/g,' ').replace(/\u2212/g,'-').trim();
-  const visible=el=>!!el&&el.nodeType===1&&!el.closest('button,input,textarea,select,script,style,[hidden],[aria-hidden="true"],[role="button"],[role="dialog"],[role="menu"]')&&
-    el.getClientRects().length>0&&getComputedStyle(el).visibility!=='hidden';
-  const text=el=>visible(el)?norm(el.innerText):'';
-  const parse=raw=>{
-    let value=norm(raw);
-    if(!value||value.length>48)return null;
-    const prefix=value.match(/^(-?)\s*(?:US\s*\$|\$|USD)\s*/i);
-    const suffix=value.match(/\s*(?:USD|US\s*\$|\$)$/i);
-    if(prefix){value=prefix[1]+value.slice(prefix[0].length);}
-    else if(suffix){value=value.slice(0,-suffix[0].length).trim();}
-    else return null;
-    // Explicit USD only. Accept grouped thousands and localized decimals
-    // where their separators are unambiguous; preserve fractional credits.
-    if(/^-?\d{1,3}(?: \d{3})+(?:[.,]\d{1,6})?$/.test(value))value=value.replaceAll(' ','').replace(',','.');
-    else if(/^-?\d{1,3}(?:,\d{3})+(?:\.\d{1,6})?$/.test(value))value=value.replaceAll(',','');
-    else if(/^-?\d{1,3}(?:\.\d{3})+,\d{1,6}$/.test(value))value=value.replaceAll('.','').replace(',','.');
-    else if(/^-?\d+,\d{1,2}$/.test(value))value=value.replace(',','.');
-    if(!/^-?\d+(?:\.\d{1,6})?$/.test(value))return null;
-    const amount=Number(value);
-    return Number.isFinite(amount)&&amount>=(provider==='opencode'?0:-1000000)&&amount<=100000000?(amount===0?0:amount):null;
-  };
-  // High-specificity labels take precedence over generic labels. Never
-  // interpret budget, monthly spending, payment, invoice or top-up amounts.
-  const explicit= /^(?:(?:current |available |remaining )?credit balance|prepaid (?:credit )?balance|available credits?|remaining credits?|credits? remaining|prepaid credits?|current balance|available balance|credit remaining|баланс кредитов|остаток кредитов|доступные кредиты|кредитный баланс|текущий баланс|доступный баланс)(?:\s*\(USD\))?$/i;
-  const generic=/^(?:credits|balance|кредиты|баланс)(?:\s*\(USD\))?$/i;
-  const kind=label=>explicit.test(norm(label).replace(/[:：]$/,''))?2:provider==='opencode'&&generic.test(norm(label).replace(/[:：]$/,''))?1:0;
-  const values=[new Set(),new Set(),new Set()];
-  const seen=[false,false,false];
-  const add=(k,n)=>{if(n!==null)values[k].add(n);};
-  const result=(state,amount=null)=>diagnostic?{state,amount}:amount;
-  const mainRoots=[...document.querySelectorAll('main,[role="main"]')].filter(visible);
-  const roots=mainRoots.length?mainRoots:[document.body].filter(visible);
-  const visited=new Set();
-  for(const root of roots){
-    for(const el of root.querySelectorAll('div,span,p,dt,dd,h1,h2,h3,h4,h5,h6,strong,b,label,section,article,header,output,small')){
-      if(visited.has(el)||!visible(el))continue;
-      visited.add(el);
-      const label=text(el);
-      if(!label||label.length>160)continue;
-      // A single logical label/value may be split across many nested spans.
-      const inline=label.match(/^(.+?)(?:\s*[:：]\s*|\s+)((?:-?\s*(?:US\s*\$|\$|USD)|-?\s*\d).+)$/i);
-      if(inline){
-        const k=kind(inline[1]);
-        if(k){seen[k]=true;add(k,parse(inline[2]));}
-      }
-      const k=kind(label);
-      if(!k)continue;
-      seen[k]=true;
-      // Inspect only immediate following siblings and bounded wrappers.
-      // Stop at a nonempty unrelated sibling; don't scan arbitrary cards.
-      let node=el;
-      for(let depth=0;node&&node!==root&&depth<4;depth++,node=node.parentElement){
-        if(depth>0&&text(node)!==label)break;
-        let next=node.nextElementSibling;
-        for(let skip=0;next&&skip<3;skip++,next=next.nextElementSibling){
-          if(!visible(next))continue;
-          const adjacent=text(next);
-          if(!adjacent)continue;
-          const amount=parse(adjacent);
-          if(amount!==null)add(k,amount);
-          break;
-        }
-        const parent=node.parentElement;
-        if(parent&&parent!==root){
-          const p=text(parent);
-          if(p.length<=160&&p.toLowerCase().startsWith(label.toLowerCase()))
-            add(k,parse(p.slice(label.length).replace(/^\s*[:：]\s*/,'')));
-        }
-      }
-    }
-  }
-  // If a specific label exists, never fall back to a generic unrelated value.
-  const k=seen[2]?2:seen[1]?1:0;
-  if(!k)return result('billing_label_missing');
-  if(values[k].size>1)return result('billing_value_ambiguous');
-  if(values[k].size===1)return result('ok',[...values[k]][0]);
-  return result('billing_value_missing');
-}
-function browserEnvironment(env) {
-  // Avoid passing provider API secrets or arbitrary environment variables from
-  // the host to the child browser. Keep only OS paths/runtime necessities.
-  const names=new Set(['systemroot','windir','systemdrive','path','pathext','temp','tmp','localappdata',
-    'appdata','userprofile','programfiles','programfiles(x86)','programw6432','commonprogramfiles',
-    'commonprogramfiles(x86)','comspec','username','userdomain','homedrive','homepath','number_of_processors',
-    'processor_architecture','os','home','display','wayland_display','xdg_runtime_dir','lang']);
-  return Object.fromEntries(Object.entries(env||{}).filter(([k,v])=>names.has(k.toLowerCase())&&typeof v==='string'));
-}
-// Read the current user's HTTPS association. Registry command strings are
-// never executed: only an existing, local .exe with an allowlisted browser
-// basename is extracted. Unknown apps and unsupported engines fail closed.
-function browserFromProgId(value) {
-  const id=String(value||'').trim().toLowerCase();
-  for(const [key,spec] of Object.entries(BROWSERS)){
-    if(spec.prog.some(p=>id===p.toLowerCase()||id.startsWith(p.toLowerCase()+'.')))return key;
-  }
-  return null;
-}
-function registryValue(stdout,name=''){
-  const line=String(stdout||'').split(/\r?\n/).find(line=>{
-    const m=line.match(/^\s*(.*?)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i);
-    return m&&(name?m[1].trim().toLowerCase()===name.toLowerCase():true);
-  });
-  return line?.match(/^\s*(.*?)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i)?.[2]||null;
-}
-function registryQuery(key,value,env=process.env,platform=process.platform,execFile=require('node:child_process').execFile){
-  if(platform!=='win32')return Promise.resolve(null);
-  const systemRoot=env.SystemRoot||env.SYSTEMROOT||env.WINDIR;
-  if(typeof systemRoot!=='string'||!path.win32.isAbsolute(systemRoot)||systemRoot.startsWith('\\\\'))return Promise.resolve(null);
-  const exe=path.win32.join(systemRoot,'System32','reg.exe');
-  return new Promise(resolve=>{
-    try{
-      execFile(exe,['query',key,...(value?['/v',value]:['/ve'])],{shell:false,windowsHide:true,timeout:3000,maxBuffer:16384,env:browserEnvironment(env)},(error,stdout)=>{
-        resolve(error?null:registryValue(stdout,value));
-      });
-    }catch{resolve(null);}
-  });
-}
-function browserExecutable(command,env={}){
-  if(typeof command!=='string'||command.length>8192)return null;
-  const m=command.trim().match(/^(?:"([^"]+\.exe)"|([A-Za-z]:\\.*?\.exe))(?=\s|$)/i);
-  if(!m)return null;
-  const expanded=(m[1]||m[2]).replace(/%([A-Za-z0-9_()]+)%/g,(whole,key)=>{
-    const found=Object.entries(env).find(([name])=>name.toLowerCase()===key.toLowerCase());
-    return typeof found?.[1]==='string'?found[1]:whole;
-  });
-  // No UNC/network paths, shell syntax, alternate streams or relative paths.
-  if(!/^[A-Za-z]:\\[^<>"|?*\x00-\x1f]+\.exe$/i.test(expanded)||expanded.slice(2).includes(':')||expanded.includes('%'))return null;
-  return path.win32.normalize(expanded);
-}
-function browserMatchesPath(channel,executablePath){
-  const spec=BROWSERS[channel];
-  if(!spec||typeof executablePath!=='string')return false;
-  return path.win32.basename(executablePath).toLowerCase()===spec.exe.toLowerCase();
-}
-function browserVariant(channel,executablePath){
-  if(!channel||!executablePath)return channel;
-  const normalized=executablePath.replace(/\\/g,'/').toLowerCase();
-  // Some installations share a base ProgId across releases. Prefer the exact
-  // known installation directory if it identifies a variant of this family.
-  const family=channel.replace(/-(?:beta|dev|canary|nightly|developer|snapshot)$/,'');
-  const candidates=CHANNELS.filter(id=>id===family||id.startsWith(family+'-')).sort((a,b)=>b.length-a.length);
-  for(const id of candidates)if(browserMatchesPath(id,executablePath)&&BROWSERS[id].dirs.some(dir=>normalized.endsWith('/'+dir.toLowerCase()+'/'+BROWSERS[id].exe.toLowerCase())))return id;
-  return channel;
-}
-async function defaultWindowsBrowser(env=process.env,platform=process.platform,execFile=require('node:child_process').execFile){
-  const query=(key,value)=>registryQuery(key,value,env,platform,execFile);
-  const key='HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice';
-  const prog=await query(key,'ProgId');
-  const channel=browserFromProgId(prog);
-  if(!channel)return null;
-  // Do not interpolate untrusted registry key syntax.
-  if(!/^[A-Za-z0-9_.-]{1,150}$/.test(prog))return {channel};
-  const command=await query('HKCR\\'+prog+'\\shell\\open\\command','');
-  let executablePath=browserExecutable(command,env);
-  // Older Opera registrations point to a launcher; prefer the actual browser
-  // executable, not a launcher that may spawn a second process.
-  if(executablePath&&/^opera(?:-|$)/.test(channel)&&path.win32.basename(executablePath).toLowerCase()==='launcher.exe')
-    executablePath=path.win32.join(path.win32.dirname(executablePath),'opera.exe');
-  const resolved=browserVariant(channel,executablePath);
-  return browserMatchesPath(resolved,executablePath)?{channel:resolved,executablePath}:{channel:resolved};
-}
-async function findBrowser(preferred=null,env=process.env,access=fs.access){
-  const roots=[env['ProgramFiles(x86)'],env.ProgramW6432,env.ProgramFiles,env.LOCALAPPDATA]
-    .filter(x=>typeof x==='string'&&path.isAbsolute(x));
-  for(const channel of preferred?[preferred]:CHANNELS){
-    const spec=BROWSERS[channel];
-    if(!spec)continue;
-    for(const root of new Set(roots))for(const relative of spec.dirs){
-      const executablePath=path.join(root,...relative.split('/'),spec.exe);
-      try{await access(executablePath);return {channel,executablePath};}catch{}
-    }
-  }
-  return null;
-}
-async function findRegisteredBrowser(channel,env=process.env,access=fs.access){
-  // App Paths is useful for non-standard installations, but shared exe names
-  // (chrome.exe, browser.exe, etc.) cannot safely identify a browser variant.
-  const spec=BROWSERS[channel];
-  if(!spec||CHANNELS.filter(id=>BROWSERS[id].exe.toLowerCase()===spec.exe.toLowerCase()).length!==1)return null;
-  for(const hive of ['HKCU','HKLM']){
-    const raw=await registryQuery(hive+'\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\'+spec.exe,'',env);
-    const executablePath=browserExecutable(raw,env);
-    if(!browserMatchesPath(channel,executablePath))continue;
-    try{await access(executablePath);return {channel,executablePath};}catch{}
-  }
-  return null;
-}
-async function selectBillingBrowser({preferred=null,explicit=null,env=process.env,browserFinder=findBrowser,defaultBrowser=defaultWindowsBrowser,access=fs.access}={}){
-  // A bound or explicitly selected browser takes precedence over Windows.
-  // A new session uses the exact registered executable when available.
-  const detected=await defaultBrowser(env);
-  const system=typeof detected==='string'?{channel:detected}:detected;
-  const selected=explicit||preferred||system?.channel;
-  if(CHANNELS.includes(selected)){
-    if(system?.channel===selected&&browserMatchesPath(selected,system.executablePath)){
-      try{await access(system.executablePath);return {browser:system,state:null,choices:[]};}catch{}
-    }
-    const browser=await browserFinder(selected,env);
-    if(browser?.channel===selected)return {browser,state:null,choices:[]};
-    if(browserFinder===findBrowser){
-      const registered=await findRegisteredBrowser(selected,env,access);
-      if(registered)return {browser:registered,state:null,choices:[]};
-    }
-  }
-  const available=await Promise.all(CHANNELS.map(async channel=>{
-    const browser=await browserFinder(channel,env);
-    return browser?.channel===channel?channel:null;
-  }));
-  const choices=available.filter(Boolean);
-  return {browser:null,state:choices.length?'choose_browser':'browser_missing',choices};
-}
-function playwrightBrowserChannel(channel){
-  // Playwright recognizes only its branded channels and "chromium". Other
-  // Chromium derivatives must be launched using their own executablePath.
-  return BROWSERS[channel]?.pw||'chromium';
-}
-function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:child_process').spawn}) {
-  // The installed browser handles the provider's own OAuth flow. Do not use
-  // Playwright, CDP, automation flags, a shell, or credential extraction here.
-  return new Promise((resolve,reject)=>{
-    let child;
-    try{
-      child=spawn(browser.executablePath,[
-        '--user-data-dir='+profilePath,'--new-window','--disable-background-mode','--disable-sync',
-        // Standard accessibility mode, not browser automation or debugging.
-        '--force-renderer-accessibility=complete',url
-      ],{shell:false,detached:true,windowsHide:false,stdio:'ignore',env:browserEnvironment(env)});
-    }catch{reject(new Error('browser_error'));return;}
-    child.once('error',()=>reject(new Error('browser_error')));
-    child.once('spawn',()=>{
-      child.unref();
-      resolve({
-        pid:child.pid,
-        isRunning:()=>child.exitCode===null&&child.signalCode===null,
-        onExit:fn=>{
-          if(child.exitCode!==null||child.signalCode!==null)Promise.resolve().then(fn);
-          else child.once('exit',fn);
-        }
-      });
-    });
-  });
-}
-// The helper is installed with the plugin. It runs in a separate short-lived
-// Windows PowerShell process so an unresponsive accessibility provider
-// cannot block the host. Timeout/abort affects only the helper.
-function inspectBillingWindow({pluginFolder,browser,profilePath,provider,startedAt,pid,expected=null,signal,env=process.env,
-  platform=process.platform,execFile=require('node:child_process').execFile}={}){
-  const unavailable={state:'unavailable',reason:'helper'};
-  if(platform!=='win32'||!pluginFolder||!PROVIDERS.has(provider)||
-    !Number.isSafeInteger(pid)||pid<=0||pid>2147483647||!Number.isFinite(startedAt)||startedAt<=0||
-    !browserMatchesPath(browser?.channel,browser?.executablePath)||!path.win32.isAbsolute(profilePath||'')||
-    signal?.aborted)return Promise.resolve(unavailable);
-  const systemRoot=env.SystemRoot||env.SYSTEMROOT||env.WINDIR;
-  if(typeof systemRoot!=='string'||!path.win32.isAbsolute(systemRoot)||systemRoot.startsWith('\\\\'))return Promise.resolve(unavailable);
-  const executable=path.win32.join(systemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
-  const script=path.join(pluginFolder,'installer','BillingWindow.ps1');
-  const args=['-NoLogo','-NoProfile','-NonInteractive','-MTA','-ExecutionPolicy','Bypass','-File',script,
-    '-BrowserProcessId',String(pid),'-BrowserExecutable',browser.executablePath,'-ProfileDirectory',profilePath,
-    '-Provider',provider,'-StartedAt',String(Math.floor(startedAt))];
-  const expectedUrl=billingPage(provider,expected?.url);
-  if(expectedUrl&&Number.isInteger(expected?.window)&&expected.window!==0)
-    args.push('-ExpectedUrl',expectedUrl,'-ExpectedWindow',String(expected.window));
-  return new Promise(resolve=>{
-    try{
-      execFile(executable,args,{shell:false,windowsHide:true,timeout:12000,maxBuffer:4096,
-        env:browserEnvironment(env),...(signal?{signal}:{})},(error,stdout)=>{
-        if(error){resolve(unavailable);return;}
-        try{
-          const r=JSON.parse(String(stdout).trim());
-          if(!['ready','close_requested'].includes(r?.state)){
-            const reason=['window','document','tabs','balance','helper'].includes(r?.reason)?r.reason:'helper';
-            resolve({state:r?.state==='not_ready'?'not_ready':'unavailable',reason});return;
-          }
-          const url=billingPage(provider,r.url),window=r.window;
-          if(!url||!Number.isInteger(window)||window===0||window< -2147483648||window>2147483647||
-            (r.state==='close_requested'&&(!expectedUrl||url!==expectedUrl||window!==expected.window))){
-            resolve(unavailable);return;
-          }
-          resolve({state:r.state,url,window});
-        }catch{resolve(unavailable);}
-      });
-    }catch{resolve(unavailable);}
-  });
-}
-function loadChromium(pluginFolder) {
-  if(!pluginFolder)throw new Error('runtime_missing');
-  // Load only the packaged dependency, not arbitrary modules from PATH or the
-  // host's global node_modules. No install script or browser download at runtime.
-  const createRequire=require('node:module').createRequire;
-  const localRequire=createRequire(path.join(pluginFolder,'package.json'));
-  return localRequire(path.join(pluginFolder,'node_modules','playwright-core')).chromium;
-}
-function bounded(promise,ms) {
-  let timer;
-  return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('timeout')),ms);})])
-    .finally(()=>clearTimeout(timer));
-}
-const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,clock=Date.now,
-  io=fs,chromiumLoader=()=>loadChromium(pluginFolder),browserFinder=findBrowser,
-  loginLauncher=startLoginBrowser,defaultBrowser=defaultWindowsBrowser,pageDiscovery=discoverBillingPage,
-  retryWait=pause,windowInspector=inspectBillingWindow,env=process.env}={}) {
-  const manual=new Map(),busy=new Map(),contexts=new Set();
-  let stopped=false,timer=null,loginTimer=null,tickBusy=false;
-  const folder=account=>path.join(directory,crypto.createHash('sha256').update(account.provider+':'+account.id).digest('hex'));
-  const bindingFile=account=>path.join(folder(account),'binding.json');
-  const profile= (account,channel)=>path.join(folder(account),channel);
-  const current=async id=>{
-    const snapshot=await store.cached();
-    if(snapshot.inventoryWarning)return null;
-    return snapshot.accounts.find(a=>a.id===id&&eligible(a))||null;
-  };
-  const stateFor=(snapshot,id,provider)=>snapshot.billingSessions?.find(s=>s.id===id&&s.provider===provider);
-  async function publish(account,state,{amount=null,checkedAt=0,preserve=false,browser=null,choices=[]}={}){
-    if(stopped)return store.cached();
-    const old=stateFor(await store.cached(),account.id,account.provider);
-    if(preserve&&Number.isFinite(old?.amount)){amount=old.amount;checkedAt=old.checkedAt;}
-    return store.setBillingSession(account.id,account.provider,{id:account.id,provider:account.provider,state,amount,checkedAt,
-      browser:browser||old?.browser||null,browserChoices:choices});
-  }
-  async function readBinding(account){
-    try{
-      const b=JSON.parse(await io.readFile(bindingFile(account),'utf8'));
-      if(b?.id===account.id&&b.provider===account.provider&&CHANNELS.includes(b.channel)&&
-        typeof b.url==='string'&&billingPage(account.provider,b.url)===b.url)
-        return {...b,executablePath:browserMatchesPath(b.channel,b.executablePath)&&browserExecutable('"'+b.executablePath+'"')===b.executablePath?b.executablePath:null};
-    }catch{}
-    return null;
-  }
-  async function saveBinding(account,b){
-    await io.mkdir(folder(account),{recursive:true,mode:0o700});
-    const temp=bindingFile(account)+'.tmp';
-    await io.writeFile(temp,JSON.stringify({id:account.id,provider:account.provider,channel:b.channel,url:b.url,executablePath:b.executablePath||null}),{encoding:'utf8',mode:0o600});
-    await io.rename(temp,bindingFile(account));
-  }
-  async function closeContext(context){
-    if(!context)return;
-    try{await bounded(context.close(),10000);contexts.delete(context);}
-    catch{throw new Error('browser_error');}
-  }
-  async function launch(account,browser){
-    let chromium;
-    try{chromium=chromiumLoader();if(!chromium?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
-    try{await io.mkdir(profile(account,browser.channel),{recursive:true,mode:0o700});}
-    catch{throw new Error('profile_error');}
-    let context;
-    try{context=await chromium.launchPersistentContext(profile(account,browser.channel),{
-      channel:playwrightBrowserChannel(browser.channel),executablePath:browser.executablePath,headless:true,
-      viewport:null,acceptDownloads:false,chromiumSandbox:true,timeout:15000,
-      handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,
-      args:['--disable-background-mode','--disable-sync'],env:browserEnvironment(env)
-    });}catch(e){
-      // Publish only a fixed classification, never raw browser arguments,
-      // local paths, private URLs or exception text.
-      const message=typeof e?.message==='string'?e.message:'';
-      if(/timeout/i.test(message))throw new Error('browser_timeout');
-      if(/profile.*(?:in use|lock)|processsingleton|user data directory is already in use/i.test(message))throw new Error('profile_busy');
-      if(/access is denied|permission denied|eacces|eperm/i.test(message))throw new Error('browser_access_denied');
-      throw new Error('browser_error');
-    }
-    contexts.add(context);
-    context.once('close',()=>contexts.delete(context));
-    if(stopped){await closeContext(context).catch(()=>{});throw new Error('browser_error');}
-    return context;
-  }
-  const safeError=e=>STATES.includes(e?.message)?e.message:'browser_error';
-  async function readPage(context,account,expected=null,wait=30000){
-    const until=Date.now()+wait;
-    let last='billing_read_failed';
-    do{
-      if(stopped)return {state:'browser_error'};
-      const pages=context.pages().map(page=>({page,url:billingPage(account.provider,page.url())})).filter(p=>p.url);
-      if(pages.length>1)return {state:'billing_page_ambiguous'};
-      if(pages.length===1){
-        const {page,url}=pages[0];
-        if(expected&&url!==expected)return {state:'billing_page_ambiguous'};
-        try{
-          const observation=await bounded(page.evaluate(readBillingAmount,{provider:account.provider,diagnostic:true}),5000);
-          const value=typeof observation==='number'?observation:observation?.amount;
-          if(Number.isFinite(value)&&value>=(account.provider==='opencode'?0:-1000000)&&value<=100000000&&
-            billingPage(account.provider,page.url())===url)return {state:'ok',amount:value,url};
-          last=['billing_label_missing','billing_value_missing','billing_value_ambiguous'].includes(observation?.state)?observation.state:'billing_read_failed';
-        }catch{last='billing_read_failed';}
-      }
-      if(Date.now()>=until)break;
-      await pause(500);
-    }while(Date.now()<until);
-    return {state:expected&&!context.pages().some(p=>billingPage(account.provider,p.url())===expected)?'login_required':last};
-  }
-  async function navigateBilling(context,account,url){
-    const page=context.pages()[0]||await context.newPage();
-    let blocked=false;
-    await page.route('**/*',async route=>{
-      const request=route.request();
-      if(request.isNavigationRequest()){
-        let main=true;
-        try{main=request.frame()===page.mainFrame();}catch{}
-        if(main&&!billingPage(account.provider,request.url())){
-          blocked=true;return route.abort();
-        }
-      }
-      return route.continue();
-    });
-    try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000});}
-    catch(e){
-      if(blocked)return {state:'login_required'};
-      if(!billingPage(account.provider,page.url()))return {state:'billing_navigation_failed'};
-      // A slow SPA may already have reached the Billing URL even when
-      // domcontentloaded timed out; let the bounded read inspect it.
-    }
-    if(blocked)return {state:'login_required'};
-    // Only evaluate the expected billing document; never interact with OAuth,
-    // sign-in, verification or any other non-billing page.
-    return readPage(context,account,url);
-  }
-  async function open(account,explicit=null){
-    const existing=manual.get(account.id);
-    if(existing?.process.isRunning())return store.cached();
-    const old=await readBinding(account);
-    try{
-      // Check availability without launching an automated browser.
-      try{if(!chromiumLoader()?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
-      let selected;
-      // Keep the exact executable of an already confirmed non-standard install.
-      const saved=existing?.browser||old;
-      if(!explicit&&saved?.executablePath&&browserMatchesPath(saved.channel,saved.executablePath)){
-        try{await io.access(saved.executablePath);selected={browser:{channel:saved.channel,executablePath:saved.executablePath}};}catch{}
-      }
-      if(!selected)selected=await selectBillingBrowser({
-        preferred:saved?.channel??null,explicit,env,browserFinder,defaultBrowser
-      });
-      if(!selected.browser)return publish(account,selected.state,{choices:selected.choices});
-      const browser=selected.browser;
-      await io.rm(bindingFile(account),{force:true}).catch(()=>{throw new Error('profile_error');});
-      await publish(account,'connecting',{browser:browser.channel});
-      const profilePath=profile(account,browser.channel);
-      try{await io.mkdir(profilePath,{recursive:true,mode:0o700});}
-      catch{throw new Error('profile_error');}
-      const url=existing?.url||old?.url||ENTRY[account.provider];
-      const startedAt=clock();
-      const process=await loginLauncher({browser,profilePath,url,env});
-      const record={account,browser,process,url,profilePath,startedAt,finished:false,completion:null,
-        windowProbe:null,windowAbort:null,lastWindowProbe:0,readyWindow:null,closeRequested:false,autoCloseUrl:null,windowStatus:'awaiting_login'};
-      manual.set(account.id,record);
-      const snapshot=await publish(account,'awaiting_login',{browser:browser.channel});
-      // Authorization is always manual and outside Playwright. Once the
-      // dedicated browser exits, continue the user-initiated connection in
-      // main, regardless of whether the dashboard popup is still open.
-      process.onExit?.(()=>{void scheduleCompletion(account,record);});
-      // Also cover browser launchers that exit before the listener is attached.
-      if(!process.isRunning())void scheduleCompletion(account,record);
-      return snapshot;
-    }catch(e){return publish(account,safeError(e));}
-  }
-  const sameAttempt=(account,record)=>!stopped&&manual.get(account.id)===record;
-  async function detectPage(account,record){
-    if(record.process.isRunning())return {state:'close_login_browser'};
-    let result;
-    try{result=await pageDiscovery({provider:account.provider,profilePath:record.profilePath,dedicatedDirectory:directory,since:record.startedAt,io});}
-    catch{result={state:'billing_page_unavailable'};}
-    if(!sameAttempt(account,record))return {state:'billing_page_unavailable'};
-    const url=result.state==='page_detected'?billingPage(account.provider,result.url):null;
-    const state=url?'page_detected':(['billing_page_missing','billing_page_ambiguous','billing_page_unavailable'].includes(result.state)?result.state:'billing_page_unavailable');
-    return {state,url};
-  }
-  async function completeLogin(account,record){
-    if(!sameAttempt(account,record)||record.process.isRunning()||!await current(account.id))return;
-    const browser=record.browser.channel;
-    const finish=async state=>{
-      if(!sameAttempt(account,record))return;
-      record.finished=true;
-      return publish(account,state,{browser});
-    };
-    let context;
-    try{
-      await publish(account,'checking_billing',{browser});
-      // The browser may still be flushing its dedicated history or releasing
-      // the profile lock. Retry only these transient failures, with a bound.
-      let detected;
-      for(const delay of [0,500,1500,3000]){
-        if(delay)await retryWait(delay);
-        if(!sameAttempt(account,record)||record.process.isRunning()||!await current(account.id))return;
-        detected=await detectPage(account,record);
-        if(detected.url||detected.state==='billing_page_ambiguous')break;
-      }
-      if(!detected?.url)return finish(detected?.state||'billing_page_unavailable');
-      // If we requested the close, the flushed navigation must agree with
-      // the visible document that triggered it.
-      if(record.autoCloseUrl&&record.autoCloseUrl!==detected.url)return finish('billing_page_ambiguous');
-      let result;
-      for(const delay of [0,1000,3000]){
-        if(delay)await retryWait(delay);
-        if(!sameAttempt(account,record)||record.process.isRunning()||!await current(account.id))return;
-        try{
-          context=await launch(account,record.browser);
-          break;
-        }catch(e){
-          if(e?.message!=='profile_busy'||delay===3000)throw e;
-        }
-      }
-      if(!context)return finish('browser_error');
-      result=await navigateBilling(context,account,detected.url);
-      await closeContext(context);context=null;
-      if(!sameAttempt(account,record)||!await current(account.id))return;
-      // Never infer a zero balance or select another organization/workspace.
-      // Bind only a unique, recognized page from this login attempt for which
-      // the normal post-login read produced an actual finite amount.
-      if(result.state!=='ok')return finish(STATES.includes(result.state)?result.state:'billing_read_failed');
-      await saveBinding(account,{channel:browser,url:result.url,executablePath:record.browser.executablePath});
-      if(!sameAttempt(account,record))return;
-      record.finished=true;
-      manual.delete(account.id);
-      return publish(account,'ok',{amount:result.amount,checkedAt:clock(),browser});
-    }catch(e){
-      return finish(safeError(e));
-    }finally{if(context)await closeContext(context).catch(()=>{});}
-  }
-  function scheduleCompletion(account,record){
-    if(!sameAttempt(account,record)||record.finished||record.process.isRunning()||record.windowProbe)return Promise.resolve();
-    if(record.completion)return record.completion;
-    // Use the same per-account queue as reconnect/disconnect and periodic reads.
-    // An exit notification, a watchdog check and a refresh can never launch
-    // competing headless readers for the same profile.
-    const task=run(account,()=>completeLogin(account,record),true)
-      .catch(async()=>{if(sameAttempt(account,record)){record.finished=true;await publish(account,'browser_error').catch(()=>{});}})
-      .finally(()=>{if(record.completion===task)record.completion=null;});
-    record.completion=task;
-    return task;
-  }
-  function watchLoginWindow(account,record){
-    if(!sameAttempt(account,record)||record.finished||!record.process.isRunning()||record.closeRequested||
-      !Number.isSafeInteger(record.process.pid)||record.process.pid<=0)return Promise.resolve();
-    if(record.windowProbe)return record.windowProbe;
-    const now=clock();
-    if(record.lastWindowProbe&&now-record.lastWindowProbe<4000)return Promise.resolve();
-    record.lastWindowProbe=now;
-    const controller=new AbortController();
-    record.windowAbort=controller;
-    const task=Promise.resolve().then(async()=>{
-      if(!sameAttempt(account,record)||!record.process.isRunning()||!await current(account.id))return;
-      // A stable visible Billing page must remain selected for at least
-      // eight seconds, giving the user a chance to select their workspace.
-      const candidate=record.readyWindow;
-      const expected=candidate&&now-candidate.since>=8000?candidate:null;
-      const result=await windowInspector({pluginFolder,browser:record.browser,profilePath:record.profilePath,
-        provider:account.provider,startedAt:record.startedAt,pid:record.process.pid,expected,signal:controller.signal,env});
-      if(!sameAttempt(account,record))return;
-      const url=billingPage(account.provider,result?.url),window=result?.window;
-      let nextStatus='awaiting_login';
-      if(result?.state==='close_requested'&&expected&&url===expected.url&&window===expected.window){
-        record.autoCloseUrl=url;record.closeRequested=true;
-        record.readyWindow=null;
-        nextStatus='awaiting_login_ready';
-      }else if(result?.state==='ready'&&url&&Number.isInteger(window)&&window!==0){
-        record.readyWindow=candidate?.url===url&&candidate.window===window?candidate:{url,window,since:clock()};
-        nextStatus='awaiting_login_ready';
-      }else{
-        record.readyWindow=null;
-        const reasons={window:'awaiting_login_window',document:'awaiting_login_document',tabs:'awaiting_login_tabs',balance:'awaiting_login_balance',helper:'awaiting_login_helper'};
-        nextStatus=reasons[result?.reason]||'awaiting_login';
-      }
-      if(record.windowStatus!==nextStatus&&record.process.isRunning()&&sameAttempt(account,record)){
-        record.windowStatus=nextStatus;
-        await publish(account,nextStatus,{browser:record.browser.channel});
-      }
-    }).catch(()=>{record.readyWindow=null;}).finally(()=>{
-      if(record.windowProbe===task){record.windowProbe=null;record.windowAbort=null;}
-      if(!record.process.isRunning())void scheduleCompletion(account,record);
-    });
-    record.windowProbe=task;
-    return task;
-  }
-  function checkLoginWindows(){
-    if(stopped)return;
-    for(const record of manual.values()){
-      if(record.process.isRunning())void watchLoginWindow(record.account,record);
-      else void scheduleCompletion(record.account,record);
-    }
-  }
-  async function disconnect(account){
-    const record=manual.get(account.id);
-    try{
-      if(record?.process.isRunning())return publish(account,'disconnect_error');
-      // Remove only this plugin's dedicated, hashed account directory.
-      await io.rm(folder(account),{recursive:true,force:true});
-      manual.delete(account.id);
-      return store.setBillingSession(account.id,account.provider,null);
-    }catch{
-      await io.rm(bindingFile(account),{force:true}).catch(()=>{});
-      return publish(account,'disconnect_error');
-    }
-  }
-  async function refreshAccount(account){
-    const initialState=stateFor(await store.cached(),account.id,account.provider);
-    if(['disconnect_error','login_required',...CHOICE_STATES].includes(initialState?.state))return;
-    const binding=await readBinding(account);
-    if(!binding){
-      const state=stateFor(await store.cached(),account.id,account.provider);
-      if(Number.isFinite(state?.amount))await store.setBillingSession(account.id,account.provider,null);
-      else if((['connecting','checking_billing','awaiting_confirmation','close_login_browser','page_detected'].includes(state?.state)||state?.state?.startsWith('awaiting_login')))await publish(account,'login_required');
-      return;
-    }
-    let context;
-    try{
-      let browser=null;
-      if(binding.executablePath){
-        try{await io.access(binding.executablePath);browser={channel:binding.channel,executablePath:binding.executablePath};}catch{}
-      }
-      if(!browser)browser=await browserFinder(binding.channel,env);
-      if(!browser)throw new Error('browser_missing');
-      context=await launch(account,browser);
-      const result=await navigateBilling(context,account,binding.url);
-      if(!await current(account.id))return;
-      if(result.state==='ok')await publish(account,'ok',{amount:result.amount,checkedAt:clock(),browser:browser.channel});
-      else await publish(account,result.state,{preserve:true});
-    }catch(e){await publish(account,safeError(e),{preserve:true});}
-    finally{if(context)await closeContext(context).catch(()=>{});}
-  }
-  function run(account,fn,queue=false){
-    if(stopped)return store.cached();
-    const previous=busy.get(account.id);
-    if(previous&&!queue)return store.cached();
-    const task=Promise.resolve(previous).catch(()=>{}).then(async()=>{
-      if(stopped||!await current(account.id))return store.cached();
-      return fn();
-    }).finally(()=>{if(busy.get(account.id)===task)busy.delete(account.id);});
-    busy.set(account.id,task);return task;
-  }
-  async function action(id,verb){
-    const reply=async(accepted,reason=null)=>({accepted,reason,snapshot:await store.cached()});
-    if(stopped)return reply(false,'service_unavailable');
-    if(!ACTIONS.includes(verb))return reply(false,'invalid_action');
-    let snapshot=await store.cached();
-    // Retry the private host inventory once rather than silently ignoring a click.
-    if(snapshot.inventoryWarning){
-      try{snapshot=await bounded(store.refresh(true),20000);}catch{return reply(false,'inventory_unavailable');}
-      if(snapshot.inventoryWarning)return reply(false,'inventory_unavailable');
-    }
-    const account=snapshot.accounts.find(a=>a.id===id&&eligible(a));
-    if(!account)return reply(false,'account_unavailable');
-    try{
-      let executed=false;
-      await run(account,async()=>{
-        executed=true;
-        return verb==='disconnect'?disconnect(account):
-          open(account,verb==='open_edge'?'msedge':verb.startsWith('open_')?verb.slice(5):null);
-      },true);
-      return executed?reply(true):reply(false,'account_unavailable');
-    }catch{return reply(false,'action_failed');}
-  }
-  async function tick(){
-    if(stopped||tickBusy)return;
-    tickBusy=true;
-    try{
-      const snapshot=await store.cached();
-      // Do not poll removed accounts or an inventory known to be incomplete.
-      if(snapshot.inventoryWarning)return;
-      const connected=new Set(snapshot.accounts.filter(eligible).map(a=>a.id));
-      // Never close or kill a user-controlled login browser.
-      for(const [id,record] of manual)if(!connected.has(id)){
-        record.windowAbort?.abort();manual.delete(id);
-      }
-      for(const account of snapshot.accounts.filter(eligible)){
-        if(stopped)break;
-        const record=manual.get(account.id);
-        if(record){
-          if(record.process.isRunning())await watchLoginWindow(account,record);
-          else await scheduleCompletion(account,record);
-          continue;
-        }
-        if(busy.has(account.id))continue;
-        if(!await current(account.id))continue;
-        await run(account,()=>refreshAccount(account)).catch(()=>{});
-      }
-    }finally{tickBusy=false;}
-  }
-  function start(){
-    if(timer||stopped)return;
-    const ms=Math.max(1,Math.min(120,Number(intervalMinutes)||5))*60000;
-    timer=setInterval(()=>void tick().catch(()=>{}),ms);timer.unref?.();
-    // Short, local watchdog for lost/missed process-exit notifications.
-    // It is idle when no interactive connection is pending.
-    loginTimer=setInterval(checkLoginWindows,1500);loginTimer.unref?.();
-    // The account monitor starts independently. Try again shortly after startup
-    // to avoid waiting an entire refresh interval for the initial inventory.
-    void tick().catch(()=>{});
-  }
-  async function stop(){
-    stopped=true;if(timer)clearInterval(timer);timer=null;
-    if(loginTimer)clearInterval(loginTimer);loginTimer=null;
-    const probes=[...manual.values()].map(record=>{
-      record.windowAbort?.abort();return record.windowProbe;
-    }).filter(Boolean);
-    manual.clear();
-    await Promise.allSettled(probes);
-    await Promise.allSettled([...contexts].map(c=>closeContext(c)));
-    await Promise.allSettled([...busy.values()]);
-  }
-  return {action,tick,start,stop};
-}
-const COMMAND_ERRORS=new Set(['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed']);
-function createBillingCommands(service,{log=()=>{}}={}) {
-  const active=new Map(),results=new Map();
-  let stopped=false;
-  const record=(id,ticket,result)=>{
-    if(stopped)return;
-    results.set(id,{ticket,result});
-    // Bound process-local diagnostic metadata. No credentials or URLs here.
-    if(results.size>80)results.delete(results.keys().next().value);
-    try{log(result);}catch{}
-  };
-  function submit({id,action,ticket}={}) {
-    if(stopped)return 'service_unavailable';
-    if(typeof id!=='string'||!id||id.length>120||
-      typeof ticket!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(ticket)||
-      !ACTIONS.includes(action))return 'invalid_action';
-    const running=active.get(id);
-    if(running)return running.ticket===ticket?'queued':'busy';
-    if(active.size>=80)return 'busy';
-    if(results.get(id)?.ticket===ticket)return 'queued';
-    const entry={ticket};
-    active.set(id,entry);
-    record(id,ticket,'pending');
-    // Do not keep the host IPC invocation open during browser startup, network
-    // navigation or a credential refresh. The main service owns this task.
-    entry.task=Promise.resolve().then(()=>stopped?null:service.action(id,action)).then(result=>{
-      if(stopped)return;
-      record(id,ticket,result?.accepted===true?'accepted':
-        COMMAND_ERRORS.has(result?.reason)?result.reason:'action_failed');
-    }).catch(()=>record(id,ticket,'action_failed')).finally(()=>{
-      if(active.get(id)===entry)active.delete(id);
-    });
-    return 'queued';
-  }
-  function status({id,ticket}={}) {
-    const entry=results.get(id);
-    return entry?.ticket===ticket?entry.result:'unknown';
-  }
-  function stop(){stopped=true;results.clear();}
-  return {submit,status,stop};
-}
-module.exports={billingPage,historyBillingPages,sessionBillingPages,discoverBillingPage,eligible,readBillingAmount,browserEnvironment,BROWSERS,browserFromProgId,browserExecutable,browserVariant,defaultWindowsBrowser,findBrowser,selectBillingBrowser,playwrightBrowserChannel,startLoginBrowser,inspectBillingWindow,createBillingSessions,createBillingCommands,STATES};
-
-})(__billing,__billing.exports);
 const __presentation={exports:{}}; (function(module,exports){
 /*
  * Usage Dashboard
@@ -2163,13 +1260,12 @@ function indicatorWindows(account) {
   }
   return result;
 }
-function billingSessionFor(account,snapshot) {
-  if(account?.kind!=='api'||!['codex','opencode'].includes(account.provider))return null;
-  return (snapshot?.billingSessions||[]).find(s=>s.id===account.id&&s.provider===account.provider)||null;
-}
-function billingSessionBalance(account,snapshot) {
-  const s=billingSessionFor(account,snapshot);
-  return Number.isFinite(s?.amount)?{usd:s.amount,currency:'USD',observedAt:s.checkedAt,state:s.state}:null;
+// Only all-spend, non-model-specific budgets can describe the remaining
+// general allowance. Overlapping policies constrain rather than add.
+function tightestGeneralBudget(account,now=Date.now()){
+  const rows=(account?.budgets||[]).filter(b=>b.coverage==='all'&&b.per==='set'&&
+    Number.isFinite(b.remainingUsd)&&b.remainingUsd>=0&&Number.isFinite(b.resetsAt)&&b.resetsAt>now);
+  return rows.reduce((best,b)=>!best||b.remainingUsd<best.remainingUsd?b:best,null);
 }
 // Inventory-only metadata is not a new balance measurement. Retain previously
 // confirmed values only for the identical account while IPC is unavailable.
@@ -2180,17 +1276,14 @@ function mergeInventoryFallback(inventory,previous) {
   const accounts=current.map(a=>{
     const p=byId.get(a.id);
     if(!p||p.provider!==a.provider||p.kind!==a.kind||p.source!==a.source||p.message==='login_required')return a;
-    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits);
+    const known=Number.isFinite(p.balance?.amount)||(p.windows||[]).length||Number.isFinite(p.credits)||(p.budgets||[]).length;
     if(!known)return a;
     return {...a,active:p.active,balance:p.balance,balances:p.balances,windows:p.windows,
-      credits:p.credits,checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
+      credits:p.credits,budgets:(p.budgets||[]).filter(b=>b.resetsAt>Date.now()),
+      budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
+      checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={accounts,organizations:inventory?.organizations||[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0,
-    billingSessions:accounts.flatMap(a=>{
-      const p=byId.get(a.id),s=billingSessionFor(a,previous);
-      return p&&p.provider===a.provider&&p.kind===a.kind&&p.source===a.source&&p.message!=='login_required'&&s
-        ?[{...s,state:Number.isFinite(s.amount)?'stale':s.state}]:[];
-    })};
+  const merged={accounts,organizations:inventory?.organizations||[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
   return merged;
 }
 function formatCurrency(amount,currency) {
@@ -2204,10 +1297,9 @@ function indicatorPresentation(account,snapshot) {
     // A key spending cap is NOT wallet money. Keep the ring unknown instead of
     // misrepresenting it as a prepaid balance.
     if(own?.kind==='balance' && Number.isFinite(own.amount))return {mode:'api',amount:own.amount,currency:own.currency};
-    // Only an explicitly confirmed account-scoped Billing Session can
-    // supply a browser-derived balance.
-    const amount=billingSessionBalance(account,snapshot)?.usd??null;
-    return {mode:'api',amount,currency:'USD'};
+    const budget=tightestGeneralBudget(account);
+    if(budget)return {mode:'api',amount:budget.remainingUsd,currency:'USD',metric:'budget'};
+    return {mode:'api',amount:null,currency:'USD'};
   }
   const windows=indicatorWindows(account);
   if(windows.fiveHour!==null && windows.weekly!==null)return {
@@ -2219,7 +1311,7 @@ function indicatorPresentation(account,snapshot) {
   return {mode:'unavailable'};
 }
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,billingSessionFor,billingSessionBalance,formatCurrency,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,formatCurrency,mergeInventoryFallback };
 
 
 })(__presentation,__presentation.exports);
@@ -2403,31 +1495,25 @@ const { onCleanup, createEffect, createRoot } = require('solid-js');
 const core = __accounts.exports;
 const presentation = __presentation.exports;
 const cache = __cache.exports;
-const billing = __billing.exports;
 const switchQueue = __switchQueue.exports;
 const nativeUpdate = __nativeUpdate.exports;
 
 const ProviderBalanceSchema = Schema.Struct({amount:Schema.Number,currency:Schema.String,kind:Schema.String});
 const WindowSchema = Schema.Struct({ label:Schema.String, usedPercent:Schema.Number,
   remainingPercent:Schema.Number, resetsAt:Schema.NullOr(Schema.Number) });
+const BudgetSchema = Schema.Struct({limitUsd:Schema.Number,spentUsd:Schema.NullOr(Schema.Number),remainingUsd:Schema.NullOr(Schema.Number),
+  resetsAt:Schema.Number,scope:Schema.String,coverage:Schema.String,per:Schema.String,shared:Schema.Boolean});
 const AccountSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,kind:Schema.String,
   label:Schema.String,source:Schema.String,active:Schema.Boolean,state:Schema.String,message:Schema.String,
-  windows:Schema.Array(WindowSchema),credits:Schema.NullOr(Schema.Number),balance:Schema.NullOr(ProviderBalanceSchema),balances:Schema.Array(ProviderBalanceSchema),checkedAt:Schema.Number });
+  windows:Schema.Array(WindowSchema),credits:Schema.NullOr(Schema.Number),balance:Schema.NullOr(ProviderBalanceSchema),balances:Schema.Array(ProviderBalanceSchema),
+  budgets:Schema.Array(BudgetSchema),budgetMessage:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
 const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:Schema.String,
   month:Schema.String,state:Schema.String,message:Schema.String,usdSpent:Schema.NullOr(Schema.Number),
   monthlyBudgetUsd:Schema.NullOr(Schema.Number),usdRemainingBudget:Schema.NullOr(Schema.Number),
   limitType:Schema.String,checkedAt:Schema.Number });
-const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number,browser:Schema.NullOr(Schema.String),browserChoices:Schema.Array(Schema.String)});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,billingSessions:Schema.Array(BillingSessionSchema) });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v3',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
-// Version independently from the metrics contract. Older host clients may
-// retain method tables for an existing token across plugin reloads.
-const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v6',methods:{
-  ping:{output:Schema.String},
-  submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String}),output:Schema.String},
-  status:{input:Schema.Struct({id:Schema.String,ticket:Schema.String}),output:Schema.String}
-}});
+  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v4',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -2451,15 +1537,6 @@ const visualIntents = new Map();
 let latestSelectedID=null;
 // Retain the last authoritative main-process snapshot across popup lifetimes.
 let latestVerifiedSnapshot=null;
-const billingUiPending=new Set(),billingUiErrors=new Map();
-let billingTicketSequence=0;
-const billingUiListeners=new Set();
-function updateBillingUi(){for(const fn of billingUiListeners){try{fn();}catch{}}}
-function billingError(e,stage){
-  if(e?.message==='timeout')return 'ipc_timeout';
-  // Fixed stage identifiers only. Never surface raw IPC errors or credentials.
-  return stage==='ping'?'ipc_ping_failed':stage==='submit'?'ipc_submit_failed':'ipc_status_failed';
-}
 function notifySnapshot(snapshot){for(const listener of snapshotListeners){try{listener(snapshot);}catch{}}}
 // All user-facing generic text uses OpenCode's own translations. The host
 // supplies these keys in ALL supported Desktop languages and updates them as
@@ -2596,95 +1673,51 @@ function accountHeader(ctx,card,account,onSwitch,switchingID,api=false,summary=n
     b.addEventListener('click',()=>onSwitch(account.id));
   }
 }
-function renderBillingControls(ctx,card,account,session,onBilling,pending){
-  const actionError=billingUiErrors.get(account.id);
-  if(!['codex','opencode'].includes(account.provider)||account.kind!=='api')return;
+function renderConsoleBudgets(ctx,card,account){
+  if(account.provider!=='opencode')return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
   const tr=(en,rus)=>ru?rus:en;
-  const status=session?.state;
-  const text={
-    connecting:tr('Opening isolated browser…','Открывается отдельный браузер…'),
-    choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
-    choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
-    choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
-    awaiting_login:tr('Sign in and open Billing for this API account. The dedicated window closes automatically when the balance is recognized; otherwise close it yourself.','Войди и открой Billing нужного API-аккаунта. После распознавания баланса отдельное окно закроется автоматически; иначе закрой его вручную.'),
-    awaiting_login_window:tr('Waiting for the dedicated browser window [W01]. You can close it manually.','Не удалось однозначно определить отдельное окно [W01]. Можно закрыть его вручную.'),
-    awaiting_login_document:tr('Waiting for an accessible Billing document [W02].','Ожидаем доступную страницу Billing [W02].'),
-    awaiting_login_tabs:tr('Auto-close requires one selected browser tab [W03]. Close other tabs or the dedicated window.','Для автозакрытия нужна одна открытая вкладка [W03]. Закрой лишние вкладки или отдельное окно.'),
-    awaiting_login_balance:tr('Waiting for a readable Billing balance [W04].','Ожидаем распознавания баланса в окне Billing [W04].'),
-    awaiting_login_ready:tr('Billing page and balance recognized; closing the dedicated window…','Страница и баланс распознаны; закрываем отдельное окно…'),
-    awaiting_login_helper:tr('Window accessibility is unavailable [W05]. Close the dedicated window manually after sign-in.','Не удалось получить данные доступности окна [W05]. После входа закрой отдельное окно вручную.'),
-    checking_billing:tr('Connecting Billing automatically…','Автоматически подключаем Billing…'),
-    awaiting_confirmation:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
-    page_detected:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
-    billing_page_missing:tr('Billing page not found. Reopen the browser and visit Billing.','Страница Billing не найдена. Открой браузер и перейди в Billing.'),
-    billing_page_ambiguous:tr('Several Billing pages found. Reopen and visit only the matching page.','Найдено несколько страниц Billing. Открой браузер и перейди только на нужную страницу.'),
-    billing_page_unavailable:tr('Could not read the dedicated browser navigation data. Reopen and retry.','Не удалось определить страницу в отдельном профиле браузера. Открой его повторно.'),
-    confirmation_unavailable:tr('Balance not recognized. Check the Billing page and retry.','Баланс не распознан. Проверь страницу Billing и повтори.'),
-    close_login_browser:tr('Close all windows of the dedicated login profile.','Закрой все окна отдельного профиля входа.'),
-    ok:tr('Billing connected','Billing подключён'),
-    stale:tr('Last confirmed balance','Последний подтверждённый баланс'),
-    login_required:tr('Sign-in required. Reconnect in the normal browser.','Требуется вход. Переподключи Billing в обычном браузере.'),
-    balance_unavailable:tr('Billing balance unavailable','Баланс Billing недоступен'),
-    billing_label_missing:tr('Billing page loaded, but the credit balance label was not found [R01].','Страница Billing открылась, но подпись баланса не найдена [R01].'),
-    billing_value_missing:tr('Balance label found, but its USD amount could not be read [R02].','Подпись баланса найдена, но сумма USD не распознана [R02].'),
-    billing_value_ambiguous:tr('Several different credit balances found [R03].','Найдено несколько разных значений баланса [R03].'),
-    billing_read_failed:tr('Could not read the Billing document [R04].','Не удалось прочитать страницу Billing [R04].'),
-    billing_navigation_failed:tr('The background browser could not load Billing [R05].','Фоновый браузер не смог загрузить Billing [R05].'),
-    runtime_missing:tr('Billing runtime missing. Reinstall the plugin.','Нет модуля Billing. Переустанови плагин.'),
-    browser_missing:tr('No compatible installed Chromium browser found.','Не найден совместимый установленный Chromium-браузер.'),
-    browser_error:tr('Could not launch Billing browser.','Не удалось запустить браузер Billing.'),
-    browser_timeout:tr('Browser launch timed out.','Истекло время запуска браузера.'),
-    profile_busy:tr('Billing profile is in use. Close its browser and retry.','Профиль Billing занят. Закрой его браузер и повтори.'),
-    browser_access_denied:tr('Browser launch was denied by the system.','Система запретила запуск браузера.'),
-    profile_error:tr('Could not save billing profile.','Не удалось сохранить профиль Billing.'),
-    disconnect_error:tr('Close the billing browser and retry removal.','Закрой браузер Billing и повтори удаление.')
-  }[status];
-  const errors={
-    service_unavailable:tr('Billing service unavailable. Restart OpenCode.','Служба Billing недоступна. Перезапусти OpenCode.'),
-    inventory_unavailable:tr('Account inventory unavailable. Refresh and retry.','Список учётных данных недоступен. Обнови и повтори.'),
-    account_unavailable:tr('Account not available to Billing. Refresh and retry.','Аккаунт недоступен службе Billing. Обнови и повтори.'),
-    invalid_action:tr('Unsupported Billing action.','Действие Billing не поддерживается.'),
-    action_failed:tr('Billing action failed. Retry.','Действие Billing завершилось ошибкой. Повтори.'),
-    ipc_unavailable:tr('Billing IPC client missing [B01].','Клиент IPC Billing отсутствует [B01].'),
-    ipc_ping_failed:tr('Billing service did not accept the connection [B02].','Служба Billing не отвечает на проверку связи [B02].'),
-    ipc_submit_failed:tr('Billing command was not accepted [B03].','Команда Billing не принята [B03].'),
-    ipc_status_failed:tr('Billing command status unavailable [B04].','Статус команды Billing недоступен [B04].'),
-    ipc_protocol:tr('Billing service protocol mismatch [B05].','Несовместимый протокол Billing [B05].'),
-    busy:tr('Another Billing action is in progress.','Другое действие Billing ещё выполняется.'),
-    unknown:tr('Billing command was interrupted. Retry.','Команда Billing прервана. Повтори.'),
-    ipc_timeout:tr('Billing service did not respond.','Служба Billing не отвечает.')
+  const rows=Array.isArray(account.budgets)?account.budgets:[];
+  const list=add(card,$('div','display:flex;flex-direction:column;gap:3px;margin-top:4px;min-width:0'));
+  list.setAttribute('data-pv-console-budgets','true');
+  const messages={
+    no_budgets:tr('No applicable budgets returned','Нет доступных бюджетов'),
+    forbidden:tr('Budget access denied (403)','Нет прав на чтение бюджета (403)'),
+    unauthorized:tr('Budget authorization rejected (401)','Авторизация бюджета отклонена (401)'),
+    workspace_required:tr('Workspace missing in connection','В подключении отсутствует workspace'),
+    unsupported_console:tr('Unsupported Console origin','Неподдерживаемый адрес Console'),
+    login_expired:tr('OpenCode login expired','Срок входа в OpenCode истёк'),
+    credential_not_readable:tr('Credential unavailable','Учётные данные недоступны'),
+    rate_limited:tr('Budget request rate limited','Ограничена частота запросов бюджета'),
+    invalid_payload:tr('Unsupported budget response','Неподдерживаемый ответ бюджета'),
+    plugin_ipc_unavailable:tr('Last known budgets','Последние известные бюджеты')
   };
-  const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
-  line.setAttribute('data-pv-billing-session',status||'disconnected');
-  const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
-  const browserName=billing.BROWSERS[session?.browser]?.name;
-  const waiting=typeof status==='string'&&status.startsWith('awaiting_login');
-  const busy=pending||status==='connecting'||status==='checking_billing';
-  const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
-  if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback+(browserName&&!choosing?' · '+browserName:'')));
-  const button=(verb,label,tooltip)=>{
-    const el=add(line,$('button','box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:auto;height:18px;min-height:18px;max-height:18px;line-height:12px;border:1px solid '+palette.border+';border-radius:4px;background:transparent;color:'+palette.text+';font-family:inherit;font-size:10px;font-weight:400;padding:0 5px;margin:0;cursor:pointer;white-space:nowrap;appearance:none',label));
-    el.type='button';el.title=tooltip;el.disabled=!onBilling||busy;
-    el.setAttribute('data-pv-billing-action',verb);
-    el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb);});
-  };
-  if(choosing){
-    const choices=(session?.browserChoices||[]).filter(id=>Object.hasOwn(billing.BROWSERS,id));
-    // Old cached choice states have no list; use a fresh detection on retry.
-    for(const id of choices){
-      const name=billing.BROWSERS[id].name;
-      button('open_'+id,name,tr('Open a dedicated profile in '+name+'.','Открыть отдельный профиль в '+name+'.'));
-    }
-    button('open',tr('Retry default','Повторить выбор'),tr('Check the default or saved browser again.','Повторно проверить браузер по умолчанию или сохранённый браузер.'));
-  }else if(!waiting&&status!=='checking_billing'){
-    // No post-login confirmation or address input: main finishes the attempt
-    // automatically after the native browser exits.
-    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Select the matching organization or workspace; the window may close automatically after the balance is recognized.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после распознавания баланса окно может закрыться автоматически.'));
+  if(!rows.length){
+    add(list,$('span','font-size:9.5px;color:'+palette.muted,messages[account.budgetMessage]||tr('Budget unavailable','Бюджет недоступен')));
+    return;
   }
-  if(status&&!waiting&&status!=='checking_billing')button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
+  if(account.state==='stale')add(list,$('span','font-size:9.5px;color:'+palette.muted,tr('Last known budgets','Последние известные бюджеты')));
+  for(const budget of rows){
+    const expired=budget.resetsAt<=Date.now();
+    const remaining=expired?null:budget.remainingUsd;
+    const label=budget.per==='model'?tr('Per-model budget · lowest','Бюджет на модель · мин. остаток'):
+      budget.coverage==='all'?tr('All-spend budget','Общий бюджет расходов'):tr('Model-set budget','Бюджет группы моделей');
+    const scope=budget.scope==='each'?tr('Individual','Личный'):budget.shared?tr('Shared workspace','Общий workspace'):tr('Shared group','Общая группа');
+    const row=add(list,$('div','display:flex;align-items:center;justify-content:space-between;gap:5px;min-width:0;font-size:10px;color:'+palette.muted));
+    const name=add(row,$('span','min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',label));
+    const amount=add(row,$('span','flex-shrink:0;font-variant-numeric:tabular-nums;white-space:nowrap',money(remaining)+' / '+money(budget.limitUsd)));
+    let reset='';
+    try{reset=new Intl.DateTimeFormat(ru?'ru-RU':undefined,{dateStyle:'short',timeStyle:'short'}).format(new Date(budget.resetsAt));}catch{}
+    row.title=[label,scope,tr('Spent: ','Расход: ')+money(expired?null:budget.spentUsd),tr('Resets: ','Сброс: ')+reset].join('\n');
+    name.title=row.title;amount.title=row.title;
+    if(Number.isFinite(remaining)){
+      const track=add(list,$('div','height:3px;border-radius:2px;background:'+palette.track+';overflow:hidden'));
+      const fraction=budget.limitUsd>0?Math.min(1,Math.max(0,remaining/budget.limitUsd)):0;
+      add(track,$('div','height:100%;width:'+(fraction*100)+'%;background:'+(remaining>0?palette.success:palette.danger)));
+    }
+  }
 }
-function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder=null,onBilling=null,billingPending=null) {
+function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder=null) {
   empty(target);
   const all=presentation.connectedSubscriptions(data).concat(presentation.connectedApiKeys(data));
   // Preserve first-seen order. Switching cannot move cards even if the host
@@ -2736,10 +1769,8 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const card=compactCard(list,account.active);
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
-    const session=presentation.billingSessionFor(account,data);
-    const balance=presentation.billingSessionBalance(account,data);
-    const display=hasOwn?currencyAmount(own.amount,own.currency):(balance?money(balance.usd):'—');
-    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:balance?.observedAt??null);
+    const display=hasOwn?currencyAmount(own.amount,own.currency):'—';
+    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:null);
     const amountEl=card.querySelector('[data-pv-api-amount]');
     const ru=String(ctx.locale?.locale?.()||'en').startsWith('ru');
     if(amountEl && (!hasOwn||account.state==='stale')){
@@ -2753,20 +1784,21 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
         invalid_payload:['Provider returned an unsupported response.','Провайдер вернул неподдерживаемый ответ.'],
         invalid_balance:['Provider returned an invalid balance.','Провайдер вернул некорректный баланс.'],
         no_balance_access:['API key has no readable wallet balance or spending cap.','Ключ не предоставляет доступ к балансу или лимиту расходов.'],
-        no_usage_endpoint:['No supported balance endpoint.','Нет поддерживаемого API получения баланса.']
+        no_usage_endpoint:['No supported prepaid balance endpoint.','Нет поддерживаемого API получения остатка средств.'],
+        no_prepaid_balance:['Workspace does not use prepaid credits.','Workspace не использует предоплаченные кредиты.'],
+        unsupported_console:['Unsupported Console origin.','Неподдерживаемый адрес Console.'],
+        workspace_required:['Workspace is missing from the existing connection.','В существующем подключении отсутствует workspace.'],
+        login_expired:['OpenCode login expired.','Срок входа в OpenCode истёк.']
       };
       const reason=reasons[account.message]?.[ru?1:0];
-      const note=balance?(balance.state==='ok'?(ru?'Подтверждённый баланс Billing-сессии.':'Confirmed billing session balance.'):(ru?'Последний подтверждённый баланс Billing-сессии.':'Last confirmed billing session balance.'))
-        :hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
-        :['codex','opencode'].includes(account.provider)
-          ?(ru?'Подключи Billing-сессию для этого API-аккаунта.':'Connect a billing session for this API account.')
-          :(ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.');
+      const note=hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
+        :(ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.');
       amountEl.title=[note,reason,amountEl.title].filter(Boolean).join('\n');
     }
     const extras=Array.isArray(account.balances)?account.balances.filter(b=>b && b.kind==='balance' && b.currency!==own?.currency && Number.isFinite(b.amount)):[];
     if(extras.length) add(card,$('div',`margin-top:2px;font-size:10px;color:${palette.muted};font-variant-numeric:tabular-nums`,
       extras.map(b=>currencyAmount(b.amount,b.currency)).join(' · ')));
-    renderBillingControls(ctx,card,account,session,onBilling,billingPending?.has(account.id));
+    renderConsoleBudgets(ctx,card,account);
     if(hasOwn && own.kind==='key_limit'){
       const lang=ctx.locale?.locale?.()||'en';
       const label=String(lang).startsWith('ru')?'Остаток лимита ключа, не баланс':'API key spending cap, not account balance';
@@ -2808,7 +1840,7 @@ function publicIntegrationAccounts(value) {
       const label=rawLabel&&!/^\s*(sk-[\w-]+|oc_sk_[\w-]+|Bearer\s+|eyJ[A-Za-z0-9_-]{24,})/.test(rawLabel)
         ?rawLabel.replace(/[\x00-\x1f]/g,'').slice(0,90):`${providerLabel(provider)} account`;
       accounts.push({id:`${integration.id}:${conn.id}`,provider,kind,label,
-        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],checkedAt:0});
+        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],budgets:[],budgetMessage:null,checkedAt:0});
     }
   }
   return accounts.slice(0,80);
@@ -2831,10 +1863,10 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),billingSessions:[]};
+    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
-function createView(ctx,client,{compact=false,billingClient=null}={}) {
+function createView(ctx,client,{compact=false}={}) {
   const root=$('section',`box-sizing:border-box;min-width:0;${compact?'overflow:visible;':'overflow-y:auto;max-height:100%;'}padding:${compact?'8px 9px':'16px'};color:${palette.text};font-family:inherit;background:${compact?'var(--v2-background-bg-layer-02, var(--background,#18191d))':'transparent'}`);
   const header=add(root,$('div','display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid ${palette.border}'));
   const heading=add(header,$('strong',`font-size:12px;color:${palette.text}`,t(ctx,'usage.title')));
@@ -2844,7 +1876,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
   const body=add(root,$('div'));
   let alive=true,running=false,hasData=false,lastSnapshot=null,lastServerSnapshot=null,queuedRefresh=false,coldRefreshRequested=false,switchSequence=0,commitVersion=0;
   const stableOrder=stableAccountOrder;
-  const desiredByProvider=new Map(),billingPending=billingUiPending;
+  const desiredByProvider=new Map();
   const applyDesired=snapshot=>{
     if(!snapshot)return snapshot;
     // A popup may close while activation is still running. The global pending
@@ -2865,7 +1897,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     }
     lastSnapshot=applyDesired(snapshot);
     hasData=!!(snapshot.accounts?.length||snapshot.organizations?.length||snapshot.checkedAt);
-    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
   };
   // Queued requests are serialized per provider. While one is running,
   // subsequent clicks replace the *unstarted* request; no interim API call.
@@ -2876,7 +1908,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
   const msg=(english,russian)=>ru()?russian:english;
   function errorState(code){
     if(!alive)return;
-    if(lastSnapshot){renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);}
+    if(lastSnapshot){renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);}
     else empty(body);
     const status=add(body,note(code==='timeout'?
       msg('The plugin service did not respond. Try refresh.','Служба плагина не отвечает. Попробуй обновить.'):
@@ -2916,44 +1948,6 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       if(queuedRefresh && alive){queuedRefresh=false;void load(true);}
     }
   }
-  async function billingAction(id,action){
-    if(!alive||billingPending.has(id)||!lastSnapshot)return;
-    const account=lastSnapshot.accounts?.find(a=>a.id===id&&a.kind==='api'&&['codex','opencode'].includes(a.provider));
-    if(!account)return;
-    billingUiErrors.delete(id);
-    if(!billingClient||['ping','submit','status'].some(k=>typeof billingClient[k]!=='function')){
-      billingUiErrors.set(id,'ipc_unavailable');updateBillingUi();return;
-    }
-    billingPending.add(id);updateBillingUi();
-    const ticket=Date.now().toString(36)+'-'+(++billingTicketSequence).toString(36)+'-'+Math.random().toString(36).slice(2,10);
-    let stage='ping';
-    try{
-      const version=await bounded(signal=>billingClient.ping({signal}),8000);
-      if(version!=='billing-v6'){billingUiErrors.set(id,'ipc_protocol');return;}
-      stage='submit';
-      const ack=await bounded(signal=>billingClient.submit({id,action,ticket},{signal}),10000);
-      if(ack!=='queued'){
-        billingUiErrors.set(id,['service_unavailable','invalid_action','busy'].includes(ack)?ack:'ipc_protocol');return;
-      }
-      stage='status';
-      const until=Date.now()+120000;
-      while(Date.now()<until){
-        const result=await bounded(signal=>billingClient.status({id,ticket},{signal}),8000);
-        if(result==='pending'){
-          await new Promise(resolve=>setTimeout(resolve,500));
-          continue;
-        }
-        if(result!=='accepted')billingUiErrors.set(id,['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed','unknown'].includes(result)?result:'ipc_protocol');
-        return;
-      }
-      billingUiErrors.set(id,'ipc_timeout');
-    }catch(e){billingUiErrors.set(id,billingError(e,stage));}
-    finally{
-      billingPending.delete(id);
-      updateBillingUi();
-      if(alive)void load(false);
-    }
-  }
   // Latest-click-wins UX. Render the requested account immediately, then
   // serialize the actual OpenCode activations. Stale confirmations and failed
   // requests may never overwrite a more recent user choice.
@@ -2969,7 +1963,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     latestSelectedID=id;
     lastSnapshot=applyDesired(lastServerSnapshot);
     notifySnapshot(lastSnapshot);
-    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
 
     void activations.enqueue(provider,id).then(result=>{
       if(result.status==='superseded')return;
@@ -2985,7 +1979,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       lastSnapshot=applyDesired(snapshot);
       hasData=true;
       notifySnapshot(lastSnapshot);
-      if(alive)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+      if(alive)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
     }).catch(()=>{
       if(desiredByProvider.get(provider)!==id)return;
       // A failed older selection must never discard a newer queued choice.
@@ -2999,7 +1993,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       }
       notifySnapshot(lastSnapshot);
       if(alive){
-        renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+        renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
         add(body,note(t(ctx,'usage.error')));
       }
     });
@@ -3023,9 +2017,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
   }
   refresh.addEventListener('click',()=>void load(true));
   const timer=setInterval(()=>void load(false),5000);
-  const billingUpdated=()=>{if(alive&&lastSnapshot)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);};
-  billingUiListeners.add(billingUpdated);
-  const destroy=()=>{alive=false;clearInterval(timer);disposeState();billingUiListeners.delete(billingUpdated);};
+  const destroy=()=>{alive=false;clearInterval(timer);disposeState();};
   if(!compact)onCleanup(destroy);
   void load();
   return {root,load,destroy};
@@ -3091,7 +2083,7 @@ function indicatorGraphic(){
       apiText.setAttribute('font-size',String(size));
       if(balance.length>10){apiText.setAttribute('textLength','41');apiText.setAttribute('lengthAdjust','spacingAndGlyphs');}
       else {apiText.removeAttribute?.('textLength');apiText.removeAttribute?.('lengthAdjust');}
-      apiRing.arc.setAttribute('stroke',amount===null?palette.track:amount>0?palette.success:palette.danger);
+      apiRing.arc.setAttribute('stroke',amount===null?palette.track:amount<=0?palette.danger:state.metric==='budget'?palette.warning:palette.success);
       apiRing.arc.setAttribute('stroke-dashoffset','0');
     }else{
       unknownRing.arc.setAttribute('stroke',palette.track);
@@ -3121,7 +2113,7 @@ function sidebarMount(documentRef=document){
     return classes.includes('size-full')&&classes.includes('flex-col');
   })||null;
 }
-function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}={}){
+function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
   const wrapper=$('div',`box-sizing:border-box;flex:0 0 auto;margin-top:auto;min-height:40px;display:flex;align-items:center;justify-content:flex-start;padding:4px 4px 0;border-top:1px solid ${palette.border}`);
   wrapper.setAttribute('data-pv-usage-sidebar','true');
   const button=add(wrapper,$('button',`box-sizing:border-box;width:32px;height:32px;min-width:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;border-radius:50%;background:transparent;color:${palette.text};border:0;padding:0;box-shadow:none;appearance:none`));
@@ -3176,7 +2168,7 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}
     overlay=$('div',`position:fixed;z-index:9999;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;border:1px solid ${palette.border};border-radius:12px;box-shadow:0 16px 50px rgba(0,0,0,.32);background:var(--v2-background-bg-layer-02,var(--background,#18191d));color:${palette.text}`);
     overlay.setAttribute('role','dialog');overlay.setAttribute('aria-label',t(ctx,'usage.title'));overlay.setAttribute('data-pv-usage-popup','true');
     document.body.appendChild(overlay);
-    shown=createView(ctx,client,{compact:true,billingClient});overlay.appendChild(shown.root);
+    shown=createView(ctx,client,{compact:true});overlay.appendChild(shown.root);
     overlay.addEventListener('pointerenter',clearClose);overlay.addEventListener('pointerleave',later);overlay.addEventListener('focusout',later);
     position();
   };
@@ -3191,7 +2183,7 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}
     const detail=metric.mode==='dual'
       ?`${displayWindow(ctx,'5-hour')}: ${pct(metric.fiveHour)} · ${displayWindow(ctx,'Weekly')}: ${pct(metric.weekly)}`
       :metric.mode==='single'?`${metric.kind==='other'?t(ctx,'usage.title'):displayWindow(ctx,metric.kind==='weekly'?'Weekly':'5-hour')}: ${pct(metric.value)}`
-      :metric.mode==='api'?(metric.amount===null?'—':currencyAmount(metric.amount,metric.currency||'USD')):'—';
+      :metric.mode==='api'?(metric.amount===null?'—':metric.metric==='budget'?t(ctx,'usage.budget.left',{amount:currencyAmount(metric.amount,metric.currency||'USD')}):currencyAmount(metric.amount,metric.currency||'USD')):'—';
     const title=account?`${account.label} · ${detail}`:t(ctx,'usage.title');
     button.setAttribute('aria-label',title);button.title=title;
   };
@@ -3225,10 +2217,10 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}
   void poll();
   return {wrapper,hide,destroy};
 }
-function attachSidebarButton(ctx,client,billingClient){
+function attachSidebarButton(ctx,client){
   if(typeof document==='undefined'||!document.body||typeof document.querySelector!=='function')return ()=>{};
   const updaterDock=nativeUpdate.createNativeUpdateDock();
-  const view=buildSidebarButton(ctx,client,{billingClient,onResize:()=>updaterDock.sync(view.wrapper),getUpdaterBounds:updaterDock.bounds});
+  const view=buildSidebarButton(ctx,client,{onResize:()=>updaterDock.sync(view.wrapper),getUpdaterBounds:updaterDock.bounds});
   let disposed=false,scheduled=null,observer=null;
   const mount=()=>{
     scheduled=null;if(disposed)return;
@@ -3274,17 +2266,15 @@ exports.default=Plugin.define({
   // No duplicate translations or static English-only strings are needed.
   setup(ctx){
     const client=ctx.main(Metrics);
-    let billingClient=null;
-    try{billingClient=ctx.main(BillingCommands);}catch{/* Metrics remain usable. */}
     const tab={id:'usage',get title(){return t(ctx,'usage.title');},closable:'compact',fallback:true};
     ctx.add(Panel,{id:'usage',region:'side',width:'narrow',
       mobile:{get title(){return t(ctx,'usage.title');},kind:'menu',order:45,icon:'status'},
-      list:input=>input.open.includes('usage')?[tab]:[],render:()=>createView(ctx,client,{billingClient}).root});
+      list:input=>input.open.includes('usage')?[tab]:[],render:()=>createView(ctx,client).root});
     const launch=()=>{const session=ctx.sessions.current();if(session)ctx.layout.open(`${ctx.id}:usage`,session,{tab:'select'});};
     ctx.add(Command,()=>({id:'open',title:t(ctx,'command.usage.view'),run:launch}));
     ctx.add(MenuItem,()=>({menu:'session.panel',id:'open',title:t(ctx,'usage.title'),icon:'status',
       opened:!!ctx.sessions.current()&&ctx.layout.state(`${ctx.id}:usage`,ctx.sessions.current())!=='closed',run:launch}));
-    return attachSidebarButton(ctx,client,billingClient);
+    return attachSidebarButton(ctx,client);
   },
   main(ctx){
     // OpenCode loads GUI bundles into a host-managed execution context where
@@ -3316,14 +2306,8 @@ exports.default=Plugin.define({
       published=snapshot;
       channel?.changed?.();
     }});
-    const billingService=billing.createBillingSessions({
-      directory:pluginFolder?path.join(path.dirname(path.dirname(pluginFolder)),'.usage-dashboard-userdata','billing-sessions'):
-        path.join(cache.cacheDirectory(),'billing-sessions'),
-      pluginFolder,store,intervalMinutes:refreshMinutes
-    });
     // The IPC state pushes the disk snapshot as soon as it is read and again
     // whenever the background monitor completes or the user switches accounts.
-    // Optional browser services cannot prevent this channel from starting.
     // Main-process queue is shared by every GUI window and remains authoritative.
     // Never run overlapping credential.activate calls for one provider: the
     // final queued request is the only one allowed to follow the in-flight one.
@@ -3335,11 +2319,7 @@ exports.default=Plugin.define({
     },{onIdle:()=>{void store.refresh(true).catch(()=>{});}});
     channel=ctx.provide(Metrics,{
       state:()=>published,
-      get:()=>store.cached(),refresh:async()=>{
-        const snapshot=await store.refresh(true);
-        void billingService.tick().catch(()=>{});
-        return snapshot;
-      },
+      get:()=>store.cached(),refresh:()=>store.refresh(true),
       activate:async ({id})=>{
         const current=await store.cached();
         const item=current.accounts.find(a=>a.id===id&&a.source==='OpenCode');
@@ -3350,24 +2330,7 @@ exports.default=Plugin.define({
         return result.status==='applied'?result.value:store.cached();
       },
     });
-    const billingCommands=billing.createBillingCommands(billingService,{
-      log:result=>{try{ctx.log?.write?.('info','Usage Dashboard Billing command',{result});}catch{}}
-    });
-    // The browser command channel is separately registered and returns only
-    // scalar acknowledgements/statuses. Failures must not disable metrics.
-    try{
-      ctx.provide(BillingCommands,{
-        ping:()=> 'billing-v6',
-        submit:input=>billingCommands.submit(input),
-        status:input=>billingCommands.status(input)
-      });
-      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v6'});}catch{}
-    }catch{
-      try{ctx.log?.write?.('warn','Usage Dashboard Billing IPC registration failed',{code:'B02'});}catch{}
-    }
     store.start();
-    let disposed=false;
-    void store.refresh(true).then(()=>{if(!disposed)billingService.start();}).catch(()=>{});
     // Lightweight local account-state polling, independent of quota requests.
     // External account switches should affect the ring within one polling cycle.
     const sync=async()=>{
@@ -3380,7 +2343,7 @@ exports.default=Plugin.define({
     };
     const activeTimer=setInterval(()=>void sync(),20000);activeTimer.unref?.();
     void sync();
-    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();billingCommands.stop();void billingService.stop().catch(()=>{});};
+    return ()=>{clearInterval(activeTimer);store.stop();};
   },
 });
 

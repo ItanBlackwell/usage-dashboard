@@ -15,31 +15,25 @@ const { onCleanup, createEffect, createRoot } = require('solid-js');
 const core = require('./accounts.cjs');
 const presentation = require('./presentation.cjs');
 const cache = require('./cache.cjs');
-const billing = require('./billing-session.cjs');
 const switchQueue = require('./switch-queue.cjs');
 const nativeUpdate = require('./native-update-layout.cjs');
 
 const ProviderBalanceSchema = Schema.Struct({amount:Schema.Number,currency:Schema.String,kind:Schema.String});
 const WindowSchema = Schema.Struct({ label:Schema.String, usedPercent:Schema.Number,
   remainingPercent:Schema.Number, resetsAt:Schema.NullOr(Schema.Number) });
+const BudgetSchema = Schema.Struct({limitUsd:Schema.Number,spentUsd:Schema.NullOr(Schema.Number),remainingUsd:Schema.NullOr(Schema.Number),
+  resetsAt:Schema.Number,scope:Schema.String,coverage:Schema.String,per:Schema.String,shared:Schema.Boolean});
 const AccountSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,kind:Schema.String,
   label:Schema.String,source:Schema.String,active:Schema.Boolean,state:Schema.String,message:Schema.String,
-  windows:Schema.Array(WindowSchema),credits:Schema.NullOr(Schema.Number),balance:Schema.NullOr(ProviderBalanceSchema),balances:Schema.Array(ProviderBalanceSchema),checkedAt:Schema.Number });
+  windows:Schema.Array(WindowSchema),credits:Schema.NullOr(Schema.Number),balance:Schema.NullOr(ProviderBalanceSchema),balances:Schema.Array(ProviderBalanceSchema),
+  budgets:Schema.Array(BudgetSchema),budgetMessage:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
 const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:Schema.String,
   month:Schema.String,state:Schema.String,message:Schema.String,usdSpent:Schema.NullOr(Schema.Number),
   monthlyBudgetUsd:Schema.NullOr(Schema.Number),usdRemainingBudget:Schema.NullOr(Schema.Number),
   limitType:Schema.String,checkedAt:Schema.Number });
-const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number,browser:Schema.NullOr(Schema.String),browserChoices:Schema.Array(Schema.String)});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,billingSessions:Schema.Array(BillingSessionSchema) });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v3',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
-// Version independently from the metrics contract. Older host clients may
-// retain method tables for an existing token across plugin reloads.
-const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v6',methods:{
-  ping:{output:Schema.String},
-  submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String}),output:Schema.String},
-  status:{input:Schema.Struct({id:Schema.String,ticket:Schema.String}),output:Schema.String}
-}});
+  inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v4',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -63,15 +57,6 @@ const visualIntents = new Map();
 let latestSelectedID=null;
 // Retain the last authoritative main-process snapshot across popup lifetimes.
 let latestVerifiedSnapshot=null;
-const billingUiPending=new Set(),billingUiErrors=new Map();
-let billingTicketSequence=0;
-const billingUiListeners=new Set();
-function updateBillingUi(){for(const fn of billingUiListeners){try{fn();}catch{}}}
-function billingError(e,stage){
-  if(e?.message==='timeout')return 'ipc_timeout';
-  // Fixed stage identifiers only. Never surface raw IPC errors or credentials.
-  return stage==='ping'?'ipc_ping_failed':stage==='submit'?'ipc_submit_failed':'ipc_status_failed';
-}
 function notifySnapshot(snapshot){for(const listener of snapshotListeners){try{listener(snapshot);}catch{}}}
 // All user-facing generic text uses OpenCode's own translations. The host
 // supplies these keys in ALL supported Desktop languages and updates them as
@@ -208,95 +193,51 @@ function accountHeader(ctx,card,account,onSwitch,switchingID,api=false,summary=n
     b.addEventListener('click',()=>onSwitch(account.id));
   }
 }
-function renderBillingControls(ctx,card,account,session,onBilling,pending){
-  const actionError=billingUiErrors.get(account.id);
-  if(!['codex','opencode'].includes(account.provider)||account.kind!=='api')return;
+function renderConsoleBudgets(ctx,card,account){
+  if(account.provider!=='opencode')return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
   const tr=(en,rus)=>ru?rus:en;
-  const status=session?.state;
-  const text={
-    connecting:tr('Opening isolated browser…','Открывается отдельный браузер…'),
-    choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
-    choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
-    choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
-    awaiting_login:tr('Sign in and open Billing for this API account. The dedicated window closes automatically when the balance is recognized; otherwise close it yourself.','Войди и открой Billing нужного API-аккаунта. После распознавания баланса отдельное окно закроется автоматически; иначе закрой его вручную.'),
-    awaiting_login_window:tr('Waiting for the dedicated browser window [W01]. You can close it manually.','Не удалось однозначно определить отдельное окно [W01]. Можно закрыть его вручную.'),
-    awaiting_login_document:tr('Waiting for an accessible Billing document [W02].','Ожидаем доступную страницу Billing [W02].'),
-    awaiting_login_tabs:tr('Auto-close requires one selected browser tab [W03]. Close other tabs or the dedicated window.','Для автозакрытия нужна одна открытая вкладка [W03]. Закрой лишние вкладки или отдельное окно.'),
-    awaiting_login_balance:tr('Waiting for a readable Billing balance [W04].','Ожидаем распознавания баланса в окне Billing [W04].'),
-    awaiting_login_ready:tr('Billing page and balance recognized; closing the dedicated window…','Страница и баланс распознаны; закрываем отдельное окно…'),
-    awaiting_login_helper:tr('Window accessibility is unavailable [W05]. Close the dedicated window manually after sign-in.','Не удалось получить данные доступности окна [W05]. После входа закрой отдельное окно вручную.'),
-    checking_billing:tr('Connecting Billing automatically…','Автоматически подключаем Billing…'),
-    awaiting_confirmation:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
-    page_detected:tr('Reconnect Billing to finish automatically.','Переподключи Billing для автоматического завершения.'),
-    billing_page_missing:tr('Billing page not found. Reopen the browser and visit Billing.','Страница Billing не найдена. Открой браузер и перейди в Billing.'),
-    billing_page_ambiguous:tr('Several Billing pages found. Reopen and visit only the matching page.','Найдено несколько страниц Billing. Открой браузер и перейди только на нужную страницу.'),
-    billing_page_unavailable:tr('Could not read the dedicated browser navigation data. Reopen and retry.','Не удалось определить страницу в отдельном профиле браузера. Открой его повторно.'),
-    confirmation_unavailable:tr('Balance not recognized. Check the Billing page and retry.','Баланс не распознан. Проверь страницу Billing и повтори.'),
-    close_login_browser:tr('Close all windows of the dedicated login profile.','Закрой все окна отдельного профиля входа.'),
-    ok:tr('Billing connected','Billing подключён'),
-    stale:tr('Last confirmed balance','Последний подтверждённый баланс'),
-    login_required:tr('Sign-in required. Reconnect in the normal browser.','Требуется вход. Переподключи Billing в обычном браузере.'),
-    balance_unavailable:tr('Billing balance unavailable','Баланс Billing недоступен'),
-    billing_label_missing:tr('Billing page loaded, but the credit balance label was not found [R01].','Страница Billing открылась, но подпись баланса не найдена [R01].'),
-    billing_value_missing:tr('Balance label found, but its USD amount could not be read [R02].','Подпись баланса найдена, но сумма USD не распознана [R02].'),
-    billing_value_ambiguous:tr('Several different credit balances found [R03].','Найдено несколько разных значений баланса [R03].'),
-    billing_read_failed:tr('Could not read the Billing document [R04].','Не удалось прочитать страницу Billing [R04].'),
-    billing_navigation_failed:tr('The background browser could not load Billing [R05].','Фоновый браузер не смог загрузить Billing [R05].'),
-    runtime_missing:tr('Billing runtime missing. Reinstall the plugin.','Нет модуля Billing. Переустанови плагин.'),
-    browser_missing:tr('No compatible installed Chromium browser found.','Не найден совместимый установленный Chromium-браузер.'),
-    browser_error:tr('Could not launch Billing browser.','Не удалось запустить браузер Billing.'),
-    browser_timeout:tr('Browser launch timed out.','Истекло время запуска браузера.'),
-    profile_busy:tr('Billing profile is in use. Close its browser and retry.','Профиль Billing занят. Закрой его браузер и повтори.'),
-    browser_access_denied:tr('Browser launch was denied by the system.','Система запретила запуск браузера.'),
-    profile_error:tr('Could not save billing profile.','Не удалось сохранить профиль Billing.'),
-    disconnect_error:tr('Close the billing browser and retry removal.','Закрой браузер Billing и повтори удаление.')
-  }[status];
-  const errors={
-    service_unavailable:tr('Billing service unavailable. Restart OpenCode.','Служба Billing недоступна. Перезапусти OpenCode.'),
-    inventory_unavailable:tr('Account inventory unavailable. Refresh and retry.','Список учётных данных недоступен. Обнови и повтори.'),
-    account_unavailable:tr('Account not available to Billing. Refresh and retry.','Аккаунт недоступен службе Billing. Обнови и повтори.'),
-    invalid_action:tr('Unsupported Billing action.','Действие Billing не поддерживается.'),
-    action_failed:tr('Billing action failed. Retry.','Действие Billing завершилось ошибкой. Повтори.'),
-    ipc_unavailable:tr('Billing IPC client missing [B01].','Клиент IPC Billing отсутствует [B01].'),
-    ipc_ping_failed:tr('Billing service did not accept the connection [B02].','Служба Billing не отвечает на проверку связи [B02].'),
-    ipc_submit_failed:tr('Billing command was not accepted [B03].','Команда Billing не принята [B03].'),
-    ipc_status_failed:tr('Billing command status unavailable [B04].','Статус команды Billing недоступен [B04].'),
-    ipc_protocol:tr('Billing service protocol mismatch [B05].','Несовместимый протокол Billing [B05].'),
-    busy:tr('Another Billing action is in progress.','Другое действие Billing ещё выполняется.'),
-    unknown:tr('Billing command was interrupted. Retry.','Команда Billing прервана. Повтори.'),
-    ipc_timeout:tr('Billing service did not respond.','Служба Billing не отвечает.')
+  const rows=Array.isArray(account.budgets)?account.budgets:[];
+  const list=add(card,$('div','display:flex;flex-direction:column;gap:3px;margin-top:4px;min-width:0'));
+  list.setAttribute('data-pv-console-budgets','true');
+  const messages={
+    no_budgets:tr('No applicable budgets returned','Нет доступных бюджетов'),
+    forbidden:tr('Budget access denied (403)','Нет прав на чтение бюджета (403)'),
+    unauthorized:tr('Budget authorization rejected (401)','Авторизация бюджета отклонена (401)'),
+    workspace_required:tr('Workspace missing in connection','В подключении отсутствует workspace'),
+    unsupported_console:tr('Unsupported Console origin','Неподдерживаемый адрес Console'),
+    login_expired:tr('OpenCode login expired','Срок входа в OpenCode истёк'),
+    credential_not_readable:tr('Credential unavailable','Учётные данные недоступны'),
+    rate_limited:tr('Budget request rate limited','Ограничена частота запросов бюджета'),
+    invalid_payload:tr('Unsupported budget response','Неподдерживаемый ответ бюджета'),
+    plugin_ipc_unavailable:tr('Last known budgets','Последние известные бюджеты')
   };
-  const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
-  line.setAttribute('data-pv-billing-session',status||'disconnected');
-  const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
-  const browserName=billing.BROWSERS[session?.browser]?.name;
-  const waiting=typeof status==='string'&&status.startsWith('awaiting_login');
-  const busy=pending||status==='connecting'||status==='checking_billing';
-  const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
-  if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback+(browserName&&!choosing?' · '+browserName:'')));
-  const button=(verb,label,tooltip)=>{
-    const el=add(line,$('button','box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:auto;height:18px;min-height:18px;max-height:18px;line-height:12px;border:1px solid '+palette.border+';border-radius:4px;background:transparent;color:'+palette.text+';font-family:inherit;font-size:10px;font-weight:400;padding:0 5px;margin:0;cursor:pointer;white-space:nowrap;appearance:none',label));
-    el.type='button';el.title=tooltip;el.disabled=!onBilling||busy;
-    el.setAttribute('data-pv-billing-action',verb);
-    el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb);});
-  };
-  if(choosing){
-    const choices=(session?.browserChoices||[]).filter(id=>Object.hasOwn(billing.BROWSERS,id));
-    // Old cached choice states have no list; use a fresh detection on retry.
-    for(const id of choices){
-      const name=billing.BROWSERS[id].name;
-      button('open_'+id,name,tr('Open a dedicated profile in '+name+'.','Открыть отдельный профиль в '+name+'.'));
-    }
-    button('open',tr('Retry default','Повторить выбор'),tr('Check the default or saved browser again.','Повторно проверить браузер по умолчанию или сохранённый браузер.'));
-  }else if(!waiting&&status!=='checking_billing'){
-    // No post-login confirmation or address input: main finishes the attempt
-    // automatically after the native browser exits.
-    button('open',status?tr('Reconnect Billing','Переподключить Billing'):tr('Connect Billing','Подключить Billing'),tr('Open Billing for this account in a separate browser. Select the matching organization or workspace; the window may close automatically after the balance is recognized.','Открыть Billing этого аккаунта в отдельном браузере. Выбери нужную организацию или workspace; после распознавания баланса окно может закрыться автоматически.'));
+  if(!rows.length){
+    add(list,$('span','font-size:9.5px;color:'+palette.muted,messages[account.budgetMessage]||tr('Budget unavailable','Бюджет недоступен')));
+    return;
   }
-  if(status&&!waiting&&status!=='checking_billing')button('disconnect',tr('Disconnect','Отключить'),tr('Remove this account’s browser profile and session.','Удалить профиль и Billing-сессию этого аккаунта.'));
+  if(account.state==='stale')add(list,$('span','font-size:9.5px;color:'+palette.muted,tr('Last known budgets','Последние известные бюджеты')));
+  for(const budget of rows){
+    const expired=budget.resetsAt<=Date.now();
+    const remaining=expired?null:budget.remainingUsd;
+    const label=budget.per==='model'?tr('Per-model budget · lowest','Бюджет на модель · мин. остаток'):
+      budget.coverage==='all'?tr('All-spend budget','Общий бюджет расходов'):tr('Model-set budget','Бюджет группы моделей');
+    const scope=budget.scope==='each'?tr('Individual','Личный'):budget.shared?tr('Shared workspace','Общий workspace'):tr('Shared group','Общая группа');
+    const row=add(list,$('div','display:flex;align-items:center;justify-content:space-between;gap:5px;min-width:0;font-size:10px;color:'+palette.muted));
+    const name=add(row,$('span','min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',label));
+    const amount=add(row,$('span','flex-shrink:0;font-variant-numeric:tabular-nums;white-space:nowrap',money(remaining)+' / '+money(budget.limitUsd)));
+    let reset='';
+    try{reset=new Intl.DateTimeFormat(ru?'ru-RU':undefined,{dateStyle:'short',timeStyle:'short'}).format(new Date(budget.resetsAt));}catch{}
+    row.title=[label,scope,tr('Spent: ','Расход: ')+money(expired?null:budget.spentUsd),tr('Resets: ','Сброс: ')+reset].join('\n');
+    name.title=row.title;amount.title=row.title;
+    if(Number.isFinite(remaining)){
+      const track=add(list,$('div','height:3px;border-radius:2px;background:'+palette.track+';overflow:hidden'));
+      const fraction=budget.limitUsd>0?Math.min(1,Math.max(0,remaining/budget.limitUsd)):0;
+      add(track,$('div','height:100%;width:'+(fraction*100)+'%;background:'+(remaining>0?palette.success:palette.danger)));
+    }
+  }
 }
-function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder=null,onBilling=null,billingPending=null) {
+function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder=null) {
   empty(target);
   const all=presentation.connectedSubscriptions(data).concat(presentation.connectedApiKeys(data));
   // Preserve first-seen order. Switching cannot move cards even if the host
@@ -348,10 +289,8 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     const card=compactCard(list,account.active);
     const own=account.balance;
     const hasOwn=own && Number.isFinite(own.amount) && ['USD','CNY'].includes(own.currency);
-    const session=presentation.billingSessionFor(account,data);
-    const balance=presentation.billingSessionBalance(account,data);
-    const display=hasOwn?currencyAmount(own.amount,own.currency):(balance?money(balance.usd):'—');
-    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:balance?.observedAt??null);
+    const display=hasOwn?currencyAmount(own.amount,own.currency):'—';
+    accountHeader(ctx,card,account,onSwitch,switchingID,true,display,hasOwn?account.checkedAt:null);
     const amountEl=card.querySelector('[data-pv-api-amount]');
     const ru=String(ctx.locale?.locale?.()||'en').startsWith('ru');
     if(amountEl && (!hasOwn||account.state==='stale')){
@@ -365,20 +304,21 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
         invalid_payload:['Provider returned an unsupported response.','Провайдер вернул неподдерживаемый ответ.'],
         invalid_balance:['Provider returned an invalid balance.','Провайдер вернул некорректный баланс.'],
         no_balance_access:['API key has no readable wallet balance or spending cap.','Ключ не предоставляет доступ к балансу или лимиту расходов.'],
-        no_usage_endpoint:['No supported balance endpoint.','Нет поддерживаемого API получения баланса.']
+        no_usage_endpoint:['No supported prepaid balance endpoint.','Нет поддерживаемого API получения остатка средств.'],
+        no_prepaid_balance:['Workspace does not use prepaid credits.','Workspace не использует предоплаченные кредиты.'],
+        unsupported_console:['Unsupported Console origin.','Неподдерживаемый адрес Console.'],
+        workspace_required:['Workspace is missing from the existing connection.','В существующем подключении отсутствует workspace.'],
+        login_expired:['OpenCode login expired.','Срок входа в OpenCode истёк.']
       };
       const reason=reasons[account.message]?.[ru?1:0];
-      const note=balance?(balance.state==='ok'?(ru?'Подтверждённый баланс Billing-сессии.':'Confirmed billing session balance.'):(ru?'Последний подтверждённый баланс Billing-сессии.':'Last confirmed billing session balance.'))
-        :hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
-        :['codex','opencode'].includes(account.provider)
-          ?(ru?'Подключи Billing-сессию для этого API-аккаунта.':'Connect a billing session for this API account.')
-          :(ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.');
+      const note=hasOwn?(ru?'Последний подтверждённый баланс.':'Last confirmed balance.')
+        :(ru?'Баланс недоступен; это не означает нулевой остаток.':'Balance unavailable; this does not mean zero.');
       amountEl.title=[note,reason,amountEl.title].filter(Boolean).join('\n');
     }
     const extras=Array.isArray(account.balances)?account.balances.filter(b=>b && b.kind==='balance' && b.currency!==own?.currency && Number.isFinite(b.amount)):[];
     if(extras.length) add(card,$('div',`margin-top:2px;font-size:10px;color:${palette.muted};font-variant-numeric:tabular-nums`,
       extras.map(b=>currencyAmount(b.amount,b.currency)).join(' · ')));
-    renderBillingControls(ctx,card,account,session,onBilling,billingPending?.has(account.id));
+    renderConsoleBudgets(ctx,card,account);
     if(hasOwn && own.kind==='key_limit'){
       const lang=ctx.locale?.locale?.()||'en';
       const label=String(lang).startsWith('ru')?'Остаток лимита ключа, не баланс':'API key spending cap, not account balance';
@@ -420,7 +360,7 @@ function publicIntegrationAccounts(value) {
       const label=rawLabel&&!/^\s*(sk-[\w-]+|oc_sk_[\w-]+|Bearer\s+|eyJ[A-Za-z0-9_-]{24,})/.test(rawLabel)
         ?rawLabel.replace(/[\x00-\x1f]/g,'').slice(0,90):`${providerLabel(provider)} account`;
       accounts.push({id:`${integration.id}:${conn.id}`,provider,kind,label,
-        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],checkedAt:0});
+        source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],budgets:[],budgetMessage:null,checkedAt:0});
     }
   }
   return accounts.slice(0,80);
@@ -443,10 +383,10 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now(),billingSessions:[]};
+    return {accounts,organizations:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
-function createView(ctx,client,{compact=false,billingClient=null}={}) {
+function createView(ctx,client,{compact=false}={}) {
   const root=$('section',`box-sizing:border-box;min-width:0;${compact?'overflow:visible;':'overflow-y:auto;max-height:100%;'}padding:${compact?'8px 9px':'16px'};color:${palette.text};font-family:inherit;background:${compact?'var(--v2-background-bg-layer-02, var(--background,#18191d))':'transparent'}`);
   const header=add(root,$('div','display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid ${palette.border}'));
   const heading=add(header,$('strong',`font-size:12px;color:${palette.text}`,t(ctx,'usage.title')));
@@ -456,7 +396,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
   const body=add(root,$('div'));
   let alive=true,running=false,hasData=false,lastSnapshot=null,lastServerSnapshot=null,queuedRefresh=false,coldRefreshRequested=false,switchSequence=0,commitVersion=0;
   const stableOrder=stableAccountOrder;
-  const desiredByProvider=new Map(),billingPending=billingUiPending;
+  const desiredByProvider=new Map();
   const applyDesired=snapshot=>{
     if(!snapshot)return snapshot;
     // A popup may close while activation is still running. The global pending
@@ -477,7 +417,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     }
     lastSnapshot=applyDesired(snapshot);
     hasData=!!(snapshot.accounts?.length||snapshot.organizations?.length||snapshot.checkedAt);
-    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
   };
   // Queued requests are serialized per provider. While one is running,
   // subsequent clicks replace the *unstarted* request; no interim API call.
@@ -488,7 +428,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
   const msg=(english,russian)=>ru()?russian:english;
   function errorState(code){
     if(!alive)return;
-    if(lastSnapshot){renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);}
+    if(lastSnapshot){renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);}
     else empty(body);
     const status=add(body,note(code==='timeout'?
       msg('The plugin service did not respond. Try refresh.','Служба плагина не отвечает. Попробуй обновить.'):
@@ -528,44 +468,6 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       if(queuedRefresh && alive){queuedRefresh=false;void load(true);}
     }
   }
-  async function billingAction(id,action){
-    if(!alive||billingPending.has(id)||!lastSnapshot)return;
-    const account=lastSnapshot.accounts?.find(a=>a.id===id&&a.kind==='api'&&['codex','opencode'].includes(a.provider));
-    if(!account)return;
-    billingUiErrors.delete(id);
-    if(!billingClient||['ping','submit','status'].some(k=>typeof billingClient[k]!=='function')){
-      billingUiErrors.set(id,'ipc_unavailable');updateBillingUi();return;
-    }
-    billingPending.add(id);updateBillingUi();
-    const ticket=Date.now().toString(36)+'-'+(++billingTicketSequence).toString(36)+'-'+Math.random().toString(36).slice(2,10);
-    let stage='ping';
-    try{
-      const version=await bounded(signal=>billingClient.ping({signal}),8000);
-      if(version!=='billing-v6'){billingUiErrors.set(id,'ipc_protocol');return;}
-      stage='submit';
-      const ack=await bounded(signal=>billingClient.submit({id,action,ticket},{signal}),10000);
-      if(ack!=='queued'){
-        billingUiErrors.set(id,['service_unavailable','invalid_action','busy'].includes(ack)?ack:'ipc_protocol');return;
-      }
-      stage='status';
-      const until=Date.now()+120000;
-      while(Date.now()<until){
-        const result=await bounded(signal=>billingClient.status({id,ticket},{signal}),8000);
-        if(result==='pending'){
-          await new Promise(resolve=>setTimeout(resolve,500));
-          continue;
-        }
-        if(result!=='accepted')billingUiErrors.set(id,['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed','unknown'].includes(result)?result:'ipc_protocol');
-        return;
-      }
-      billingUiErrors.set(id,'ipc_timeout');
-    }catch(e){billingUiErrors.set(id,billingError(e,stage));}
-    finally{
-      billingPending.delete(id);
-      updateBillingUi();
-      if(alive)void load(false);
-    }
-  }
   // Latest-click-wins UX. Render the requested account immediately, then
   // serialize the actual OpenCode activations. Stale confirmations and failed
   // requests may never overwrite a more recent user choice.
@@ -581,7 +483,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     latestSelectedID=id;
     lastSnapshot=applyDesired(lastServerSnapshot);
     notifySnapshot(lastSnapshot);
-    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
 
     void activations.enqueue(provider,id).then(result=>{
       if(result.status==='superseded')return;
@@ -597,7 +499,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       lastSnapshot=applyDesired(snapshot);
       hasData=true;
       notifySnapshot(lastSnapshot);
-      if(alive)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+      if(alive)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
     }).catch(()=>{
       if(desiredByProvider.get(provider)!==id)return;
       // A failed older selection must never discard a newer queued choice.
@@ -611,7 +513,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
       }
       notifySnapshot(lastSnapshot);
       if(alive){
-        renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);
+        renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
         add(body,note(t(ctx,'usage.error')));
       }
     });
@@ -635,9 +537,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
   }
   refresh.addEventListener('click',()=>void load(true));
   const timer=setInterval(()=>void load(false),5000);
-  const billingUpdated=()=>{if(alive&&lastSnapshot)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder,billingAction,billingPending);};
-  billingUiListeners.add(billingUpdated);
-  const destroy=()=>{alive=false;clearInterval(timer);disposeState();billingUiListeners.delete(billingUpdated);};
+  const destroy=()=>{alive=false;clearInterval(timer);disposeState();};
   if(!compact)onCleanup(destroy);
   void load();
   return {root,load,destroy};
@@ -703,7 +603,7 @@ function indicatorGraphic(){
       apiText.setAttribute('font-size',String(size));
       if(balance.length>10){apiText.setAttribute('textLength','41');apiText.setAttribute('lengthAdjust','spacingAndGlyphs');}
       else {apiText.removeAttribute?.('textLength');apiText.removeAttribute?.('lengthAdjust');}
-      apiRing.arc.setAttribute('stroke',amount===null?palette.track:amount>0?palette.success:palette.danger);
+      apiRing.arc.setAttribute('stroke',amount===null?palette.track:amount<=0?palette.danger:state.metric==='budget'?palette.warning:palette.success);
       apiRing.arc.setAttribute('stroke-dashoffset','0');
     }else{
       unknownRing.arc.setAttribute('stroke',palette.track);
@@ -733,7 +633,7 @@ function sidebarMount(documentRef=document){
     return classes.includes('size-full')&&classes.includes('flex-col');
   })||null;
 }
-function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}={}){
+function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
   const wrapper=$('div',`box-sizing:border-box;flex:0 0 auto;margin-top:auto;min-height:40px;display:flex;align-items:center;justify-content:flex-start;padding:4px 4px 0;border-top:1px solid ${palette.border}`);
   wrapper.setAttribute('data-pv-usage-sidebar','true');
   const button=add(wrapper,$('button',`box-sizing:border-box;width:32px;height:32px;min-width:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;border-radius:50%;background:transparent;color:${palette.text};border:0;padding:0;box-shadow:none;appearance:none`));
@@ -788,7 +688,7 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}
     overlay=$('div',`position:fixed;z-index:9999;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;border:1px solid ${palette.border};border-radius:12px;box-shadow:0 16px 50px rgba(0,0,0,.32);background:var(--v2-background-bg-layer-02,var(--background,#18191d));color:${palette.text}`);
     overlay.setAttribute('role','dialog');overlay.setAttribute('aria-label',t(ctx,'usage.title'));overlay.setAttribute('data-pv-usage-popup','true');
     document.body.appendChild(overlay);
-    shown=createView(ctx,client,{compact:true,billingClient});overlay.appendChild(shown.root);
+    shown=createView(ctx,client,{compact:true});overlay.appendChild(shown.root);
     overlay.addEventListener('pointerenter',clearClose);overlay.addEventListener('pointerleave',later);overlay.addEventListener('focusout',later);
     position();
   };
@@ -803,7 +703,7 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}
     const detail=metric.mode==='dual'
       ?`${displayWindow(ctx,'5-hour')}: ${pct(metric.fiveHour)} · ${displayWindow(ctx,'Weekly')}: ${pct(metric.weekly)}`
       :metric.mode==='single'?`${metric.kind==='other'?t(ctx,'usage.title'):displayWindow(ctx,metric.kind==='weekly'?'Weekly':'5-hour')}: ${pct(metric.value)}`
-      :metric.mode==='api'?(metric.amount===null?'—':currencyAmount(metric.amount,metric.currency||'USD')):'—';
+      :metric.mode==='api'?(metric.amount===null?'—':metric.metric==='budget'?t(ctx,'usage.budget.left',{amount:currencyAmount(metric.amount,metric.currency||'USD')}):currencyAmount(metric.amount,metric.currency||'USD')):'—';
     const title=account?`${account.label} · ${detail}`:t(ctx,'usage.title');
     button.setAttribute('aria-label',title);button.title=title;
   };
@@ -837,10 +737,10 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds,billingClient}
   void poll();
   return {wrapper,hide,destroy};
 }
-function attachSidebarButton(ctx,client,billingClient){
+function attachSidebarButton(ctx,client){
   if(typeof document==='undefined'||!document.body||typeof document.querySelector!=='function')return ()=>{};
   const updaterDock=nativeUpdate.createNativeUpdateDock();
-  const view=buildSidebarButton(ctx,client,{billingClient,onResize:()=>updaterDock.sync(view.wrapper),getUpdaterBounds:updaterDock.bounds});
+  const view=buildSidebarButton(ctx,client,{onResize:()=>updaterDock.sync(view.wrapper),getUpdaterBounds:updaterDock.bounds});
   let disposed=false,scheduled=null,observer=null;
   const mount=()=>{
     scheduled=null;if(disposed)return;
@@ -886,17 +786,15 @@ exports.default=Plugin.define({
   // No duplicate translations or static English-only strings are needed.
   setup(ctx){
     const client=ctx.main(Metrics);
-    let billingClient=null;
-    try{billingClient=ctx.main(BillingCommands);}catch{/* Metrics remain usable. */}
     const tab={id:'usage',get title(){return t(ctx,'usage.title');},closable:'compact',fallback:true};
     ctx.add(Panel,{id:'usage',region:'side',width:'narrow',
       mobile:{get title(){return t(ctx,'usage.title');},kind:'menu',order:45,icon:'status'},
-      list:input=>input.open.includes('usage')?[tab]:[],render:()=>createView(ctx,client,{billingClient}).root});
+      list:input=>input.open.includes('usage')?[tab]:[],render:()=>createView(ctx,client).root});
     const launch=()=>{const session=ctx.sessions.current();if(session)ctx.layout.open(`${ctx.id}:usage`,session,{tab:'select'});};
     ctx.add(Command,()=>({id:'open',title:t(ctx,'command.usage.view'),run:launch}));
     ctx.add(MenuItem,()=>({menu:'session.panel',id:'open',title:t(ctx,'usage.title'),icon:'status',
       opened:!!ctx.sessions.current()&&ctx.layout.state(`${ctx.id}:usage`,ctx.sessions.current())!=='closed',run:launch}));
-    return attachSidebarButton(ctx,client,billingClient);
+    return attachSidebarButton(ctx,client);
   },
   main(ctx){
     // OpenCode loads GUI bundles into a host-managed execution context where
@@ -928,14 +826,8 @@ exports.default=Plugin.define({
       published=snapshot;
       channel?.changed?.();
     }});
-    const billingService=billing.createBillingSessions({
-      directory:pluginFolder?path.join(path.dirname(path.dirname(pluginFolder)),'.usage-dashboard-userdata','billing-sessions'):
-        path.join(cache.cacheDirectory(),'billing-sessions'),
-      pluginFolder,store,intervalMinutes:refreshMinutes
-    });
     // The IPC state pushes the disk snapshot as soon as it is read and again
     // whenever the background monitor completes or the user switches accounts.
-    // Optional browser services cannot prevent this channel from starting.
     // Main-process queue is shared by every GUI window and remains authoritative.
     // Never run overlapping credential.activate calls for one provider: the
     // final queued request is the only one allowed to follow the in-flight one.
@@ -947,11 +839,7 @@ exports.default=Plugin.define({
     },{onIdle:()=>{void store.refresh(true).catch(()=>{});}});
     channel=ctx.provide(Metrics,{
       state:()=>published,
-      get:()=>store.cached(),refresh:async()=>{
-        const snapshot=await store.refresh(true);
-        void billingService.tick().catch(()=>{});
-        return snapshot;
-      },
+      get:()=>store.cached(),refresh:()=>store.refresh(true),
       activate:async ({id})=>{
         const current=await store.cached();
         const item=current.accounts.find(a=>a.id===id&&a.source==='OpenCode');
@@ -962,24 +850,7 @@ exports.default=Plugin.define({
         return result.status==='applied'?result.value:store.cached();
       },
     });
-    const billingCommands=billing.createBillingCommands(billingService,{
-      log:result=>{try{ctx.log?.write?.('info','Usage Dashboard Billing command',{result});}catch{}}
-    });
-    // The browser command channel is separately registered and returns only
-    // scalar acknowledgements/statuses. Failures must not disable metrics.
-    try{
-      ctx.provide(BillingCommands,{
-        ping:()=> 'billing-v6',
-        submit:input=>billingCommands.submit(input),
-        status:input=>billingCommands.status(input)
-      });
-      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v6'});}catch{}
-    }catch{
-      try{ctx.log?.write?.('warn','Usage Dashboard Billing IPC registration failed',{code:'B02'});}catch{}
-    }
     store.start();
-    let disposed=false;
-    void store.refresh(true).then(()=>{if(!disposed)billingService.start();}).catch(()=>{});
     // Lightweight local account-state polling, independent of quota requests.
     // External account switches should affect the ring within one polling cycle.
     const sync=async()=>{
@@ -992,6 +863,6 @@ exports.default=Plugin.define({
     };
     const activeTimer=setInterval(()=>void sync(),20000);activeTimer.unref?.();
     void sync();
-    return ()=>{disposed=true;clearInterval(activeTimer);store.stop();billingCommands.stop();void billingService.stop().catch(()=>{});};
+    return ()=>{clearInterval(activeTimer);store.stop();};
   },
 });
