@@ -46,3 +46,14 @@ providers' supported metrics.
 Balances require specific provider APIs or, for the OpenAI prepaid balance,
 the optional browser companion described in [BROWSER_EXTENSION.md](BROWSER_EXTENSION.md).
 Missing/unavailable metrics do **not** mean a $0 balance.
+
+## OpenCode and OpenCode Go
+
+Connect the account in OpenCode's provider settings. OpenCode pay-as-you-go
+(also known as Zen) appears as an API account; its credit balance is currently
+unavailable in Usage Dashboard. OpenCode Go appears as a subscription even
+when authenticated with an API key. It uses the official Go usage endpoint
+for 5-hour, weekly and monthly windows. If the endpoint denies access or
+returns no usable metrics, the connected account remains visible with unknown
+limits. Unconnected catalog entries are not displayed.
+

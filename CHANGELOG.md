@@ -2,6 +2,9 @@
 
 ## 0.13.0 (unreleased)
 
+- Show connected OpenCode pay-as-you-go and OpenCode Go accounts; retrieve Go
+  quota windows from the official usage API, without guessing missing balances.
+
 - Release the project as open source under the Mozilla Public License 2.0.
 - Document installation, GUI layout support, browser extension and security reporting.
 - Add issue templates, contributor guidance and code of conduct.

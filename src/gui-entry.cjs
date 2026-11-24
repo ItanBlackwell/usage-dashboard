@@ -59,7 +59,7 @@ function notifySnapshot(snapshot){for(const listener of snapshotListeners){try{l
 // supplies these keys in ALL supported Desktop languages and updates them as
 // soon as the user changes the interface language.
 const fallback = {
-  'usage.title':'Usage', 'usage.retry':'Try again', 'usage.go.weekly':'Weekly',
+  'usage.title':'Usage', 'usage.retry':'Try again', 'usage.go.weekly':'Weekly', 'usage.go.monthly':'Monthly',
   'usage.error':"Usage limits couldn't be loaded.",
   'usage.duration.days':'{{days}}d {{hours}}h',
   'usage.duration.hours':'{{hours}}h {{minutes}}m',
@@ -86,6 +86,7 @@ function duration(ctx,ts) {
 }
 const displayWindow=(ctx,name)=> name==='Weekly'?t(ctx,'usage.go.weekly'):
   name?.startsWith('Weekly ·')?`${t(ctx,'usage.go.weekly')} ·${name.slice(6)}`:
+  name==='Monthly'?t(ctx,'usage.go.monthly'):
   name==='5-hour'?'5 h':name;
 function setRefreshSpinning(button,on){
   if(!button)return;
@@ -137,7 +138,7 @@ function progress(ctx,parent,win,mode='single'){
     label.title=new Intl.DateTimeFormat(undefined,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'}).format(new Date(win.resetsAt));
   }
 }
-const PROVIDER_NAMES={codex:'OpenAI',claude:'Claude',gemini:'Gemini',deepseek:'DeepSeek',kimi:'Kimi',qwen:'Qwen',zai:'Z.AI',openrouter:'OpenRouter',minimax:'MiniMax'};
+const PROVIDER_NAMES={codex:'OpenAI',claude:'Claude',gemini:'Gemini',deepseek:'DeepSeek',kimi:'Kimi',qwen:'Qwen',zai:'Z.AI',openrouter:'OpenRouter',minimax:'MiniMax',opencode:'OpenCode','opencode-go':'OpenCode Go'};
 const providerLabel = provider => PROVIDER_NAMES[provider]||provider;
 
 function compactCard(parent,active=false){
@@ -167,7 +168,7 @@ function accountHeader(ctx,card,account,onSwitch,switchingID,api=false,summary=n
     const badge=add(header,$('span',`font-size:12px;color:${palette.success};flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px`,'✓'));
     badge.setAttribute('aria-label',t(ctx,'settings.providers.account.switched.description',{account:account.label}));
     badge.title=t(ctx,'settings.providers.account.switched.description',{account:account.label});
-  }else if(onSwitch && account.message!=='plugin_ipc_unavailable' && account.id.includes(':')){
+  }else if(onSwitch && account.message!=='plugin_ipc_unavailable' && account.id.includes(':') && !account.id.includes(':env:')){
     const b=add(header,$('button',`border:1px solid ${palette.border};border-radius:5px;width:22px;height:22px;display:flex;align-items:center;justify-content:center;background:transparent;color:${palette.text};cursor:pointer;flex-shrink:0;padding:0`));
     b.type='button';b.dataset && (b.dataset.accountId=account.id);
     b.setAttribute('data-pv-switch-account',account.id);
@@ -278,13 +279,18 @@ function publicIntegrationAccounts(value) {
       kimi:['moonshotai','moonshotai-cn','moonshot','moonshot-cn','kimi','kimi-coding','kimi-for-coding'],
       qwen:['alibaba','dashscope','qwen','qwen-code'],
       zai:['zai','zai-coding-plan','zai-cn-coding-plan','zhipuai','zhipuai-coding-plan','glm'],
-      openrouter:['openrouter'],minimax:['minimax','minimax-cn','minimax-coding-plan','minimax-cn-coding-plan']};
-    const provider=Object.keys(ids).find(p=>ids[p].includes(integration?.id))||null;
+      openrouter:['openrouter'],minimax:['minimax','minimax-cn','minimax-coding-plan','minimax-cn-coding-plan'],
+      opencode:['opencode'],'opencode-go':['opencode-go']};
+    const provider=Object.keys(ids).find(p=>ids[p].includes(String(integration?.id||'').toLowerCase()))||null;
     if(!provider||!Array.isArray(integration.connections))continue;
     for(const conn of integration.connections){
       if(conn?.type!=='credential'||typeof conn.id!=='string'||conn.status?.status==='needs_auth')continue;
-      accounts.push({id:`${integration.id}:${conn.id}`,provider,kind:conn.method==='key'&&!/(?:coding-plan|kimi-(?:for-)?coding)$/.test(integration.id)?'api':'subscription',
-        label:typeof conn.label==='string'?conn.label.slice(0,90):provider==='codex'?'OpenAI account':'Claude account',
+      const kind=provider==='opencode-go'?'subscription':provider==='opencode'?'api':
+        conn.method==='key'&&!/(?:coding-plan|kimi-(?:for-)?coding)$/.test(integration.id)?'api':'subscription';
+      const rawLabel=typeof conn.label==='string'?conn.label.trim():'';
+      const label=rawLabel&&!/^\s*(sk-[\w-]+|oc_sk_[\w-]+|Bearer\s+|eyJ[A-Za-z0-9_-]{24,})/.test(rawLabel)
+        ?rawLabel.replace(/[\x00-\x1f]/g,'').slice(0,90):`${providerLabel(provider)} account`;
+      accounts.push({id:`${integration.id}:${conn.id}`,provider,kind,label,
         source:'OpenCode',active:false,state:'unavailable',message:'plugin_ipc_unavailable',windows:[],credits:null,balance:null,balances:[],checkedAt:0});
     }
   }

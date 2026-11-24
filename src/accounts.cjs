@@ -26,14 +26,18 @@ const PROVIDER_IDS = Object.freeze({
   qwen:['alibaba','dashscope','qwen','qwen-code'],
   zai:['zai','zai-coding-plan','zai-cn-coding-plan','zhipuai','zhipuai-coding-plan','glm'],
   openrouter:['openrouter'],
+  opencode:['opencode'],
+  'opencode-go':['opencode-go'],
   minimax:['minimax','minimax-cn','minimax-coding-plan','minimax-cn-coding-plan'],
 });
 const DISPLAY = Object.freeze({codex:'OpenAI',claude:'Claude',gemini:'Gemini',deepseek:'DeepSeek',
-  kimi:'Kimi',qwen:'Qwen',zai:'Z.AI',openrouter:'OpenRouter',minimax:'MiniMax'});
+  kimi:'Kimi',qwen:'Qwen',zai:'Z.AI',openrouter:'OpenRouter',minimax:'MiniMax',
+  opencode:'OpenCode','opencode-go':'OpenCode Go'});
 const PROVIDER_ENV = Object.freeze({
   gemini:['GEMINI_API_KEY','GOOGLE_GENERATIVE_AI_API_KEY'], deepseek:['DEEPSEEK_API_KEY'],
   kimi:['MOONSHOT_API_KEY','MOONSHOTAI_API_KEY','KIMI_API_KEY','KIMI_CODING_API_KEY'],
   qwen:['DASHSCOPE_API_KEY','QWEN_API_KEY'],zai:['ZAI_API_KEY','GLM_API_KEY','ZHIPUAI_API_KEY'],
+  opencode:['OPENCODE_API_KEY'], 'opencode-go':['OPENCODE_GO_API_KEY','OPENCODE_API_KEY'],
   openrouter:['OPENROUTER_API_KEY'],minimax:['MINIMAX_API_KEY','MINIMAX_CN_API_KEY','MINIMAX_CODING_API_KEY'],
 });
 const CODEX_URL = 'https://chatgpt.com/backend-api/wham/usage';
@@ -58,7 +62,7 @@ const timestamp = x => {
 const fingerprint = token => crypto.createHash('sha256').update(token).digest('hex'); // main-process dedupe only
 const safeLabel = (x, fallback) => {
   const label = string(x);
-  if (!label || /^\s*(sk-[\w-]+|Bearer\s+|eyJ[A-Za-z0-9_-]{24,})/.test(label)) return fallback;
+  if (!label || /^\s*(sk-[\w-]+|oc_sk_[\w-]+|Bearer\s+|eyJ[A-Za-z0-9_-]{24,})/.test(label)) return fallback;
   return label.replace(/[\x00-\x1f]/g, '').slice(0, 90);
 };
 function providerFor(integrationID) {
@@ -71,6 +75,10 @@ function isCodingPlan(id) {
 }
 function classify(connection, cred) {
   const id=cred?.integrationID || connection?.integrationID;
+  // Go is a subscription even when it is connected with an API key.
+  const provider = providerFor(id);
+  if (provider === 'opencode-go') return 'subscription';
+  if (provider === 'opencode') return 'api';
   const type = cred?.value?.type || (connection?.type === 'env' ? 'key' : connection?.method);
   return type === 'oauth' || (type === 'external' && providerFor(id) === 'claude') || isCodingPlan(id)
     ? 'subscription' : 'api';
@@ -301,14 +309,34 @@ function parseMiniMaxQuota(body){
   if(!windows.length)throw new Error('missing_windows');
   return {windows,credits:null};
 }
+function parseOpenCodeGoUsage(body) {
+  const windows = [];
+  for (const [key,label] of [['rolling','5-hour'],['weekly','Weekly'],['monthly','Monthly']]) {
+    const item = object(body?.usage?.[key]);
+    const used = item?.percent;
+    // Percent is consumed allowance, not remaining dollars or tokens.
+    if (!['ok','rate-limited'].includes(item?.status)
+      || typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > 100) continue;
+    const resetsAt = typeof item.resetsAt === 'string' ? Date.parse(item.resetsAt) : NaN;
+    windows.push({label,usedPercent:used,remainingPercent:100-used,
+      resetsAt:Number.isFinite(resetsAt)?resetsAt:null});
+  }
+  if (!windows.length) throw new Error('missing_windows');
+  return {windows,credits:null};
+}
 // Never send a stored provider token to user-supplied URLs, gateways, mirrors or
 // a different provider's hostname. The mapping here is deliberately fixed.
 async function queryAdditional(entry,fetcher){
-  if(['gemini','qwen'].includes(entry.provider))
+  if(['gemini','qwen','opencode'].includes(entry.provider))
     return {state:'unavailable',message:'no_usage_endpoint'};
   const key=entry.apiKey || entry.access;
   if(!key)return {state:'unavailable',message:'credential_not_readable'};
   const headers={Authorization:`Bearer ${key}`,Accept:'application/json'};
+  if(entry.provider==='opencode-go'){
+    // Official Go usage API; use only the credential for this integration.
+    const value=await fetchSafe('https://opencode.ai/inference/go/v1/usage',headers,fetcher);
+    return {state:'ok',message:'ok',kind:'subscription',...parseOpenCodeGoUsage(value)};
+  }
   if(entry.provider==='deepseek'){
     const value=await fetchSafe('https://api.deepseek.com/user/balance',headers,fetcher);
     const balances=parseDeepSeekBalances(value);
@@ -468,7 +496,8 @@ function parseOrgConfigs(env = process.env) {
     if (Array.isArray(items)) for (const item of items.slice(0, MAX_ORGS)) {
       const provider = providerFor(item?.provider);
       const key = string(item?.key);
-      if (provider && key) all.push({ provider, key, label:safeLabel(item.label, 'Organization'), budget:number(item.monthlyBudgetUsd) });
+      // Only these providers have organization-cost integrations below.
+      if (['codex','claude'].includes(provider) && key) all.push({ provider, key, label:safeLabel(item.label, 'Organization'), budget:number(item.monthlyBudgetUsd) });
     }
   } catch { /* invalid env is ignored, not logged */ }
   const seen = new Set();
@@ -498,6 +527,7 @@ async function queryOrg(org, {fetcher=fetch,now=new Date()}={}) {
   const safe = { id:`${org.provider}:${fingerprint(org.key).slice(0,12)}`, provider:org.provider,
     label:org.label, month, state:'unavailable', message:'admin_key_required',
     usdSpent:null, monthlyBudgetUsd:budget, usdRemainingBudget:null, limitType, checkedAt:now.getTime() };
+  if (!['codex','claude'].includes(org.provider)) return {...safe,message:'no_usage_endpoint'};
   let total = 0;
   const start = new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1));
   const end = new Date(Math.max(now.getTime(), start.getTime() + 1000));
@@ -617,5 +647,5 @@ async function activateConnectedAccount({client,id,snapshot,force=false}={}) {
   return {id,provider:item.provider,unchanged:false};
 }
 
-module.exports={providerFor,parseDeepSeekBalance,parseDeepSeekBalances,parseKimiBalance,parseKimiCoding,parseOpenRouterKey,parseOpenRouterCredits,parseZaiQuota,parseMiniMaxQuota,queryAdditional,parseClaudeUsage,parseClaudeCostsPage,collectAccounts,readLocalCli,readAllAccounts,localSidecar,sidecarList,
+module.exports={providerFor,parseDeepSeekBalance,parseDeepSeekBalances,parseKimiBalance,parseKimiCoding,parseOpenRouterKey,parseOpenRouterCredits,parseZaiQuota,parseMiniMaxQuota,parseOpenCodeGoUsage,queryAdditional,parseClaudeUsage,parseClaudeCostsPage,collectAccounts,readLocalCli,readAllAccounts,localSidecar,sidecarList,
   readAllOrganizations,parseOrgConfigs,queryQuota,queryOrg,makeDashboardMonitor,activateConnectedAccount};

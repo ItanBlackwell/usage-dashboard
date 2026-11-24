@@ -10,7 +10,7 @@
 // catalog entries. An unavailable quota for an authenticated account is still
 // useful, but login-required / expired entries are not connected.
 const unsupported = new Set(['login_required']);
-const providers = ['codex','claude','gemini','deepseek','kimi','qwen','zai','openrouter','minimax'];
+const providers = ['codex','claude','gemini','deepseek','kimi','qwen','zai','openrouter','minimax','opencode','opencode-go'];
 function connectedSubscriptions(data) {
   return (Array.isArray(data?.accounts) ? data.accounts : [])
     .filter(a => a && a.kind === 'subscription' && providers.includes(a.provider)
