@@ -2,6 +2,10 @@
 
 ## 0.13.0 (unreleased)
 
+- Add an experimental lower-left floating indicator for Top tabs, reusing the
+  existing popup and switching automatically to the in-flow sidebar indicator
+  for Side tabs and Inbox. Keep native updater alignment in sidebar layouts.
+
 - Prioritize wallet balances and remaining quota bars in the compact view.
   Keep spending, usage counters, budget details and diagnostics in collapsed
   disclosures; preserve sub-cent costs. Use a dash without a redundant
