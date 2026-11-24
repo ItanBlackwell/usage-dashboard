@@ -28,9 +28,10 @@ default browser if it is a recognized installed Chromium browser; otherwise,
 choose a detected compatible browser in the account card. Brave, Opera, Opera GX,
 Vivaldi and other Chromium derivatives are experimental. See the browser catalog
 in [Billing Session](BILLING_SESSION.md). Select the correct
-billing organization/workspace, and copy the Billing page address. Close all
-windows of that login profile. Paste the address in Usage Dashboard and click
-**Confirm account**. Automated reading starts only after manual login.
+billing organization/workspace and open its Billing page. Close all windows
+of that login profile. Usage Dashboard discovers the Billing page automatically;
+click **Confirm account** after verifying the account. No URL input is needed.
+Automated balance reading starts only after manual login and confirmation.
 See [Billing Session](BILLING_SESSION.md) for the complete instructions.
 
 The Portable ZIP contains the verified runtime archive. Source ZIP installation

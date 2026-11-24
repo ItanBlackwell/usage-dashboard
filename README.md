@@ -57,9 +57,10 @@ No Developer mode or browser extension is necessary.
 2. In the separate normal browser window, sign in yourself (including Google
    sign-in if offered by the provider). Select the matching organization or
    workspace and open its Billing page.
-3. Copy the Billing page address and close all windows of that separate login
-   profile. Return to the popup, paste the address and click **Confirm account**.
-   Verify that the billing account owns the connected API key first.
+3. Verify that the billing account owns the connected API key, then close all
+   windows of that separate login profile. The plugin discovers the Billing
+   page automatically. Return to the popup and click **Confirm account**.
+   No URL needs to be copied or pasted.
 
 Only after manual sign-in is complete does the plugin attempt automated,
 headless balance reads using that isolated session. Authentication is never

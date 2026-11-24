@@ -67,11 +67,12 @@ runtime manifest rather than directly deserializing npm's lockfile.
    [Billing overview](https://platform.openai.com/settings/organization/billing/overview).
    For Zen, select the workspace in [OpenCode Console](https://opencode.ai/console)
    and open its Billing settings.
-4. Verify that the page corresponds to this API key. Copy its address and
-   close **all windows of the dedicated login profile**. Do not close unrelated
-   browser profiles. Return to Usage Dashboard and paste the address into the
-   Billing field, then select **Confirm account**. Reopen the popup if needed.
-   The plugin now attempts a headless read of that specific Billing page using
+4. Verify that the page corresponds to this API key and close **all windows
+   of the dedicated login profile**. Do not close unrelated browser profiles.
+   Usage Dashboard automatically detects the Billing page from the dedicated
+   browser's navigation records for this login attempt. Return to the popup
+   and select **Confirm account**. No URL needs to be copied or pasted.
+   The plugin now attempts a headless read of the detected Billing page using
    the existing session. A recognized explicit balance (including zero) is saved.
 5. Subsequent reads happen in a headless browser on the configured refresh
    interval, while OpenCode Desktop is running. A manual refresh also requests
@@ -101,6 +102,17 @@ Desktop version. Main-process diagnostics record only fixed command outcomes.
   If the provider does not permit headless reads, the balance remains unavailable.
 - If the login browser is still open, close its dedicated windows and retry
   confirmation. The plugin never terminates your login browser.
+- If page detection finds no Billing page, reopen the dedicated browser and
+  visit the correct provider's Billing page before closing it.
+- If several distinct Billing pages are found, reopen the dedicated browser and
+  visit only the page for the intended account in the new login attempt.
+  The plugin does not guess which organization or workspace you intended.
+- Automatic detection reads only allowlisted Billing URLs from the dedicated
+  profile using the host's read-only SQLite API, with an unencrypted Chromium
+  session-file fallback. A browser that does not save history, changes its
+  storage format, or encrypts the fallback session file may be unavailable.
+  No decryption, credential extraction or inspection of personal browser
+  profiles is attempted.
 - If no unambiguous amount is visible, the plugin does not assume zero.
   Check the correct organization/workspace and billing permissions. A redesign
   or localization of the page can make the experimental extractor unavailable.
@@ -119,9 +131,13 @@ configuration root. Browser storage contains sensitive authentication data.
 Do not copy, publish or share this directory. No cookies, tokens or raw page
 content are sent to the renderer or included in the metrics cache. Only a
 sanitized account ID, status, amount and timestamp are published. The
-user-pasted Billing URL is validated against fixed provider origins and
-Billing paths, stripped of unrelated query parameters and retained only in
-the private local binding. The ordinary login browser has no automation
+detected Billing URL is validated against fixed provider origins and Billing
+paths, stripped of unrelated query parameters and retained only in the private
+local binding. The reader examines only the dedicated profile, after the
+ordinary login browser closes, and retains only recognized Billing URLs from
+the current login attempt. It does not read cookies, saved passwords, page
+titles or OAuth parameters. No navigation records or URLs are returned to
+the renderer. The ordinary login browser has no automation
 connection. Subsequent headless reads use a private automation pipe and
 retain browser sandboxing. No external debugging listener or personal
 browser profile is used.

@@ -119,6 +119,7 @@ jobs:
             const service=createBillingSessions({directory:dir,store,
               defaultBrowser:async()=> 'msedge',
               browserFinder:async()=>({channel:'msedge',executablePath:'edge.exe'}),
+              pageDiscovery:async()=>({state:'page_detected',url}),
               loginLauncher:async({url:target,profilePath})=>{
                 manualLaunches++;assert.equal(target,url);assert.ok(profilePath.startsWith(dir));
                 return {isRunning:()=>running};
@@ -129,11 +130,10 @@ jobs:
             try{
               assert.equal((await service.action(a.id,'open')).snapshot.billingSessions[0].state,'awaiting_confirmation');
               assert.equal(manualLaunches,1);assert.equal(automatedLaunches,0);
-              assert.equal((await service.action(a.id,'confirm','https://accounts.google.com/')).reason,'invalid_billing_page');
-              assert.equal((await service.action(a.id,'confirm',url)).snapshot.billingSessions[0].state,'close_login_browser');
+              assert.equal((await service.action(a.id,'confirm')).snapshot.billingSessions[0].state,'close_login_browser');
               assert.equal(automatedLaunches,0);
               running=false;
-              const result=await service.action(a.id,'confirm',url);
+              const result=await service.action(a.id,'confirm');
               assert.equal(result.snapshot.billingSessions[0].state,'ok');
               assert.equal(result.snapshot.billingSessions[0].amount,0);
               assert.equal(automatedLaunches,1);assert.equal(closed,1);
@@ -150,6 +150,65 @@ jobs:
                 }});
               assert.equal(native.isRunning(),true);
             }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
+      - name: Verify automatic Billing page discovery
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs/promises');
+          const os=require('node:os');
+          const path=require('node:path');
+          const {DatabaseSync}=require('node:sqlite');
+          const {discoverBillingPage,sessionBillingPages}=require('./src/billing-session.cjs');
+          (async()=>{
+            const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ud-billing-pages-'));
+            const since=Date.now();
+            const now=BigInt(since)*1000n+11644473600000000n;
+            const base='https://opencode.ai/workspace/test-a/billing';
+            const other='https://opencode.ai/workspace/test-b/billing';
+            const profile=path.join(dir,'Default');
+            await fs.mkdir(profile);
+            const file=path.join(profile,'History');
+            const db=new DatabaseSync(file);
+            try{
+              db.exec('CREATE TABLE urls (url TEXT, last_visit_time INTEGER)');
+              const insert=db.prepare('INSERT INTO urls VALUES (?,?)');
+              insert.run(base+'?unrelated=private',now);
+              insert.run(other,now-1000n);
+              insert.run('https://accounts.google.com/signin?code=private',now);
+              insert.run('https://opencode.ai.evil.invalid/workspace/test-c/billing',now);
+              const discover=()=>discoverBillingPage({provider:'opencode',profilePath:dir,since});
+              assert.deepEqual(await discover(),{state:'page_detected',url:base});
+              insert.run(other,now);
+              assert.deepEqual(await discover(),{state:'billing_page_ambiguous'});
+              assert.deepEqual(await discoverBillingPage({provider:'codex',profilePath:dir,since}),{state:'billing_page_missing'});
+              // Synthetic cleartext Chromium navigation records, including
+              // the original navigation timestamp and empty optional strings.
+              const navRecord=(url,timestamp)=>{
+                const nav=Buffer.from(url);
+                const p=16+Math.ceil(nav.length/4)*4;
+                const payload=Buffer.alloc(p+40);
+                payload.writeUInt32LE(payload.length-4,0);payload.writeInt32LE(1,4);
+                payload.writeInt32LE(0,8);payload.writeInt32LE(nav.length,12);nav.copy(payload,16);
+                payload.writeBigInt64LE(timestamp,p+32);
+                const cmd=Buffer.alloc(3);cmd.writeUInt16LE(payload.length+1);cmd[2]=6;
+                return Buffer.concat([cmd,payload]);
+              };
+              const header=Buffer.alloc(8);header.write('SNSS');header.writeUInt32LE(3,4);
+              const data=Buffer.concat([header,navRecord(other,now-1000n),navRecord(base,now),
+                navRecord('https://accounts.google.com/signin?code=private',now)]);
+              assert.deepEqual(sessionBillingPages(data,'opencode',since),[base]);
+              assert.deepEqual(sessionBillingPages(data,'opencode',since+1),[]);
+              const encrypted=Buffer.from(data);encrypted.writeUInt32LE(5,4);
+              assert.equal(sessionBillingPages(encrypted,'opencode',since),null);
+              assert.equal(sessionBillingPages(data.subarray(0,-1),'opencode',since),null);
+              const sessions=path.join(profile,'Sessions');await fs.mkdir(sessions);
+              await fs.writeFile(path.join(sessions,'Session_'+now),data);
+              const fallback=await discoverBillingPage({provider:'opencode',profilePath:dir,since,loadSQLite:()=>{throw Error('not available');}});
+              assert.deepEqual(fallback,{state:'page_detected',url:base});
+            }finally{db.close();await fs.rm(dir,{recursive:true,force:true});}
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
       - name: Verify system-default Billing browser selection

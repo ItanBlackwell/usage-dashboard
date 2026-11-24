@@ -22,9 +22,13 @@ and the potential impact. Redact all secrets and private account data.
 - Billing Session uses dedicated per-account browser profiles, never a user's
   existing browser profile. Manual login takes place in an ordinary browser
   with no automation connection. Only after the user closes that window and
-  confirms an allowlisted Billing page address are headless reads attempted.
-  Authentication remains in private local browser storage. The user-supplied
-  canonical Billing URL is retained in a local binding, not the metrics cache.
+  confirms the matching account are headless reads attempted. Billing page
+  discovery uses read-only navigation records of the dedicated profile and
+  restricts the results to allowlisted provider Billing URLs from the current
+  login attempt. It does not read personal profiles, credentials, cookies,
+  saved passwords or encrypted session files. Authentication remains in
+  private local browser storage. The canonical Billing URL is retained in a
+  local binding, not the renderer or metrics cache.
   No automated sign-in, credential extraction or verification bypass is used.
   Provider pages return only a sanitized amount; browser sandboxing is retained.
 - Browser selection reads the current user's HTTPS association without changing

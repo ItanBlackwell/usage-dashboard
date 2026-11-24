@@ -20,9 +20,9 @@ Public-release preparation for Usage Dashboard. This release is **not published*
 3. Reopen OpenCode and select **Side tabs** or **Inbox** under Interface layout.
 
 See [Installation](docs/INSTALLATION.md) and [Billing Session](docs/BILLING_SESSION.md).
-Sign in in the ordinary dedicated browser, copy the matching Billing page
-address, close the login window, and confirm the address in Usage Dashboard
-before headless balance reads.
+Sign in in the ordinary dedicated browser, open the matching Billing page,
+close the login window, and confirm the account in Usage Dashboard before
+headless balance reads. Billing page detection is automatic.
 
 ## Improvements
 - Public-facing documentation, support guidelines and updated open-source license.

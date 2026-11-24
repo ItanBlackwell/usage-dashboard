@@ -46,7 +46,7 @@ const ACTIONS = ['open','open_edge',...CHANNELS.map(id=>'open_'+id),'confirm','d
 const CHOICE_STATES = ['choose_edge','choose_chrome','choose_browser'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
 const STATES = ['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale',
-  'choose_edge','choose_chrome','choose_browser','close_login_browser','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
+  'choose_edge','choose_chrome','choose_browser','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
 
 function billingPage(provider,raw) {
   try {
@@ -65,6 +65,161 @@ function billingPage(provider,raw) {
       return u.origin+u.pathname.replace(/\/$/,'');
   }catch{}
   return null;
+}
+// Navigation discovery is limited to the user-authorized dedicated profile,
+// after the ordinary login window closes. Never query the personal browser,
+// Cookies, Login Data, authentication URLs, page titles or browsing contents.
+const WINDOWS_EPOCH_US=11644473600000000n;
+const MAX_DISCOVERY_BYTES=16*1024*1024;
+const visitCutoff=ms=>BigInt(Math.floor(ms))*1000n+WINDOWS_EPOCH_US;
+const billingPatterns=provider=>provider==='codex'
+  ?['https://platform.openai.com/settings/organization/billing/overview*']
+  :provider==='opencode'
+    ?['https://opencode.ai/workspace/*/billing*','https://opencode.ai/*/settings/billing*']:[];
+
+// Chromium stores its ordinary history in SQLite. Only URLs of candidate
+// billing pages visited during this login attempt are returned by the query.
+// Reference: Chromium history_database.cc and url_database.cc.
+function historyBillingPages(file,provider,since,loadSQLite=()=>require('node:sqlite')){
+  const patterns=billingPatterns(provider);
+  if(!patterns.length)return [];
+  const {DatabaseSync}=loadSQLite();
+  const db=new DatabaseSync(file,{readOnly:true,allowExtension:false});
+  try{
+    db.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=250;');
+    const query='SELECT url FROM urls WHERE last_visit_time>=? AND length(url)<=512 AND ('+
+      patterns.map(()=>'url GLOB ?').join(' OR ')+') LIMIT 65';
+    const rows=db.prepare(query).all(visitCutoff(since),...patterns);
+    if(rows.length>=65)return null; // truncated evidence is ambiguous
+    return [...new Set(rows.map(row=>billingPage(provider,row.url)).filter(Boolean))];
+  }finally{db.close();}
+}
+
+// Fallback for unencrypted Chromium session files, if the host lacks SQLite
+// or this browser's History format cannot be read. Parse only the URL field
+// of UpdateTabNavigation records; never decode titles, serialized page state,
+// other record types, or encrypted session storage. The file format is
+// described by Chromium SessionCommand and SerializedNavigationEntry.
+function navigationTimestamp(buffer,pickle,end,length){
+  // Skip length-delimited fields without decoding them. The serialized
+  // navigation timestamp prevents restored entries from an earlier login
+  // being mistaken for visits made in this attempt.
+  let pos=pickle+16+Math.ceil(length/4)*4;
+  const skipString=unit=>{
+    if(pos+4>end)return false;
+    const n=buffer.readInt32LE(pos);
+    if(n<0||n>(end-pos-4)/unit)return false;
+    pos+=4+Math.ceil(n*unit/4)*4;
+    return pos<=end;
+  };
+  const skip=n=>{pos+=n;return pos<=end;};
+  if(!skipString(2)||!skipString(1)||!skip(8)||!skipString(1)||!skip(4)||
+    !skipString(1)||!skip(4)||pos+8>end)return null;
+  return buffer.readBigInt64LE(pos);
+}
+function sessionBillingPages(buffer,provider,since){
+  if(!Buffer.isBuffer(buffer)||buffer.length<8||buffer.length>MAX_DISCOVERY_BYTES||
+    buffer.toString('ascii',0,4)!=='SNSS'||![1,3].includes(buffer.readUInt32LE(4)))return null;
+  if(!Number.isFinite(since)||since<=0)return null;
+  const cutoff=visitCutoff(since);
+  const prefix=Buffer.from(provider==='codex'?'https://platform.openai.com/settings/organization/billing/overview':'https://opencode.ai/');
+  const pages=new Set();
+  for(let offset=8;offset<buffer.length;){
+    if(offset+3>buffer.length)return null;
+    const size=buffer.readUInt16LE(offset),start=offset+2,end=start+size;
+    if(size<1||end>buffer.length)return null;
+    if(buffer[start]===6&&size>=17){
+      const pickle=start+1;
+      const payloadSize=buffer.readUInt32LE(pickle);
+      const length=buffer.readInt32LE(pickle+12);
+      if(payloadSize===size-5&&length>0&&length<=512&&pickle+16+length<=end){
+        // Decode only candidate URLs under the expected provider origin.
+        if(length>=prefix.length&&buffer.subarray(pickle+16,pickle+16+prefix.length).equals(prefix)){
+          const url=billingPage(provider,buffer.toString('utf8',pickle+16,pickle+16+length));
+          if(url){
+            const timestamp=navigationTimestamp(buffer,pickle,end,length);
+            if(timestamp===null)return null;
+            if(timestamp>=cutoff)pages.add(url);
+          }
+          if(pages.size>1)return [...pages];
+        }
+      }
+    }
+    offset=end;
+  }
+  return [...pages];
+}
+async function plainFile(io,root,file,maxSize){
+  try{
+    const stat=await io.lstat(file);
+    if(!stat.isFile()||stat.isSymbolicLink()||stat.size>maxSize)return false;
+    const actual=await io.realpath(file),rel=path.relative(root,actual);
+    return !!rel&&!path.isAbsolute(rel)&&rel!=='..'&&!rel.startsWith('..'+path.sep);
+  }catch{return false;}
+}
+async function discoverBillingPage({provider,profilePath,dedicatedDirectory,since,io=fs,loadSQLite}={}){
+  if(!PROVIDERS.has(provider)||!Number.isFinite(since)||since<=0)return {state:'billing_page_unavailable'};
+  let root;
+  try{
+    const st=await io.lstat(profilePath);
+    if(!st.isDirectory()||st.isSymbolicLink())return {state:'billing_page_unavailable'};
+    root=await io.realpath(profilePath);
+    if(dedicatedDirectory){
+      const base=await io.realpath(dedicatedDirectory);
+      const expected=path.relative(dedicatedDirectory,profilePath);
+      const actual=path.relative(base,root);
+      // Reject a junction/symlink redirecting a hashed account directory
+      // into another profile, even when the final directory itself is normal.
+      if(!expected||path.isAbsolute(expected)||expected==='..'||expected.startsWith('..'+path.sep)||
+        actual!==expected)return {state:'billing_page_unavailable'};
+    }
+  }catch{return {state:'billing_page_unavailable'};}
+  const pages=new Set();
+  let readable=false,uncertain=false;
+  // Chromium and its derivatives use either Default or the user-data root
+  // itself. No traversal into arbitrary profiles or user's personal history.
+  const profiles=[path.join(root,'Default'),root];
+  for(const dir of profiles){
+    const file=path.join(dir,'History');
+    if(!await plainFile(io,root,file,128*1024*1024))continue;
+    try{
+      const found=historyBillingPages(file,provider,since,loadSQLite);
+      if(found===null){uncertain=true;continue;}
+      readable=true;
+      for(const url of found)pages.add(url);
+    }catch{}
+  }
+  if(uncertain||pages.size>1)return {state:'billing_page_ambiguous'};
+  if(readable)return pages.size===1?{state:'page_detected',url:[...pages][0]}:{state:'billing_page_missing'};
+  // Recent session files only; no older session restore files and no decryption.
+  // The filename is a timestamp in microseconds since the Windows epoch.
+  for(const dir of profiles){
+    const sessions=path.join(dir,'Sessions');
+    let entries;
+    try{
+      const st=await io.lstat(sessions),real=await io.realpath(sessions);
+      const rel=path.relative(root,real);
+      if(!st.isDirectory()||st.isSymbolicLink()||!rel||path.isAbsolute(rel)||rel==='..'||rel.startsWith('..'+path.sep))continue;
+      entries=await io.readdir(sessions);
+    }catch{continue;}
+    const cutoff=visitCutoff(since);
+    const files=entries.filter(name=>/^Session_\d{15,20}$/.test(name)&&BigInt(name.slice(8))>=cutoff).sort();
+    if(files.length>8){uncertain=true;continue;}
+    for(const name of files){
+      const file=path.join(sessions,name);
+      if(!await plainFile(io,root,file,MAX_DISCOVERY_BYTES))continue;
+      try{
+        const bytes=await io.readFile(file);
+        const found=sessionBillingPages(bytes,provider,since);
+        if(found===null){uncertain=true;continue;}
+        readable=true;
+        for(const url of found)pages.add(url);
+      }catch{}
+    }
+  }
+  if(pages.size>1)return {state:'billing_page_ambiguous'};
+  if(uncertain)return {state:'billing_page_unavailable'};
+  return pages.size===1?{state:'page_detected',url:[...pages][0]}:{state:readable?'billing_page_missing':'billing_page_unavailable'};
 }
 function eligible(account) {
   return account?.kind==='api'&&PROVIDERS.has(account.provider)&&typeof account.id==='string'&&
@@ -260,7 +415,13 @@ function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:chil
     child.once('error',()=>reject(new Error('browser_error')));
     child.once('spawn',()=>{
       child.unref();
-      resolve({isRunning:()=>child.exitCode===null&&child.signalCode===null});
+      resolve({
+        isRunning:()=>child.exitCode===null&&child.signalCode===null,
+        onExit:fn=>{
+          if(child.exitCode!==null||child.signalCode!==null)Promise.resolve().then(fn);
+          else child.once('exit',fn);
+        }
+      });
     });
   });
 }
@@ -280,7 +441,7 @@ function bounded(promise,ms) {
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,clock=Date.now,
   io=fs,chromiumLoader=()=>loadChromium(pluginFolder),browserFinder=findBrowser,
-  loginLauncher=startLoginBrowser,defaultBrowser=defaultWindowsBrowser,env=process.env}={}) {
+  loginLauncher=startLoginBrowser,defaultBrowser=defaultWindowsBrowser,pageDiscovery=discoverBillingPage,env=process.env}={}) {
   const manual=new Map(),busy=new Map(),contexts=new Set();
   let stopped=false,timer=null,tickBusy=false;
   const folder=account=>path.join(directory,crypto.createHash('sha256').update(account.provider+':'+account.id).digest('hex'));
@@ -413,17 +574,42 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       try{await io.mkdir(profilePath,{recursive:true,mode:0o700});}
       catch{throw new Error('profile_error');}
       const url=existing?.url||old?.url||ENTRY[account.provider];
+      const startedAt=clock();
       const process=await loginLauncher({browser,profilePath,url,env});
-      manual.set(account.id,{browser,process,url});
-      return publish(account,'awaiting_confirmation',{browser:browser.channel});
+      const record={browser,process,url,profilePath,startedAt};
+      manual.set(account.id,record);
+      const snapshot=await publish(account,'awaiting_confirmation',{browser:browser.channel});
+      // Discover automatically when the dedicated native browser exits.
+      // The user still explicitly confirms the account before headless reads.
+      process.onExit?.(()=>{
+        if(stopped||manual.get(account.id)!==record)return;
+        void run(account,async()=>{
+          if(manual.get(account.id)===record&&!record.process.isRunning())await detectPage(account,record);
+        },true).catch(()=>{});
+      });
+      return snapshot;
     }catch(e){return publish(account,safeError(e));}
   }
-  async function confirm(account,rawPage){
+  async function detectPage(account,record){
+    if(record.process.isRunning())return {state:'close_login_browser'};
+    let result;
+    try{result=await pageDiscovery({provider:account.provider,profilePath:record.profilePath,dedicatedDirectory:directory,since:record.startedAt,io});}
+    catch{result={state:'billing_page_unavailable'};}
+    if(stopped||manual.get(account.id)!==record)return {state:'billing_page_unavailable'};
+    const url=result.state==='page_detected'?billingPage(account.provider,result.url):null;
+    const state=url?'page_detected':(['billing_page_missing','billing_page_ambiguous','billing_page_unavailable'].includes(result.state)?result.state:'billing_page_unavailable');
+    await publish(account,state,{browser:record.browser.channel});
+    return {state,url};
+  }
+  async function confirm(account){
     const record=manual.get(account.id);
     if(!record)return publish(account,'login_required');
     if(record.process.isRunning())return publish(account,'close_login_browser');
-    const url=billingPage(account.provider,rawPage);
-    if(!url)return publish(account,'confirmation_unavailable');
+    // Retry detection in case the native browser flushed history on shutdown.
+    // Do not accept arbitrary renderer-provided billing URLs.
+    const resultPage=await detectPage(account,record);
+    const url=resultPage.url;
+    if(!url)return store.cached();
     let context,result;
     try{
       // No browser process is killed or attached to. If Chromium reports
@@ -459,7 +645,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     if(!binding){
       const state=stateFor(await store.cached(),account.id,account.provider);
       if(Number.isFinite(state?.amount))await store.setBillingSession(account.id,account.provider,null);
-      else if(['connecting','awaiting_confirmation','confirmation_unavailable','close_login_browser'].includes(state?.state))await publish(account,'login_required');
+      else if(['connecting','awaiting_confirmation','confirmation_unavailable','close_login_browser','page_detected','billing_page_missing','billing_page_ambiguous','billing_page_unavailable'].includes(state?.state))await publish(account,'login_required');
       return;
     }
     let context;
@@ -488,7 +674,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }).finally(()=>{if(busy.get(account.id)===task)busy.delete(account.id);});
     busy.set(account.id,task);return task;
   }
-  async function action(id,verb,page=''){
+  async function action(id,verb){
     const reply=async(accepted,reason=null)=>({accepted,reason,snapshot:await store.cached()});
     if(stopped)return reply(false,'service_unavailable');
     if(!ACTIONS.includes(verb))return reply(false,'invalid_action');
@@ -500,12 +686,11 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }
     const account=snapshot.accounts.find(a=>a.id===id&&eligible(a));
     if(!account)return reply(false,'account_unavailable');
-    if(verb==='confirm'&&!billingPage(account.provider,page))return reply(false,'invalid_billing_page');
     try{
       let executed=false;
       await run(account,async()=>{
         executed=true;
-        return verb==='confirm'?confirm(account,page):verb==='disconnect'?disconnect(account):
+        return verb==='confirm'?confirm(account):verb==='disconnect'?disconnect(account):
           open(account,verb==='open_edge'?'msedge':verb.startsWith('open_')?verb.slice(5):null);
       },true);
       return executed?reply(true):reply(false,'account_unavailable');
@@ -545,7 +730,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   }
   return {action,tick,start,stop};
 }
-const COMMAND_ERRORS=new Set(['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','invalid_billing_page','action_failed']);
+const COMMAND_ERRORS=new Set(['service_unavailable','inventory_unavailable','account_unavailable','invalid_action','action_failed']);
 function createBillingCommands(service,{log=()=>{}}={}) {
   const active=new Map(),results=new Map();
   let stopped=false;
@@ -556,13 +741,11 @@ function createBillingCommands(service,{log=()=>{}}={}) {
     if(results.size>80)results.delete(results.keys().next().value);
     try{log(result);}catch{}
   };
-  function submit({id,action,ticket,page=''}={}) {
+  function submit({id,action,ticket}={}) {
     if(stopped)return 'service_unavailable';
     if(typeof id!=='string'||!id||id.length>120||
       typeof ticket!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(ticket)||
-      !ACTIONS.includes(action)||
-      typeof page!=='string'||page.length>512||(action!=='confirm'&&page!=='')||
-      (action==='confirm'&&!billingPage('codex',page)&&!billingPage('opencode',page)))return 'invalid_action';
+      !ACTIONS.includes(action))return 'invalid_action';
     const running=active.get(id);
     if(running)return running.ticket===ticket?'queued':'busy';
     if(active.size>=80)return 'busy';
@@ -572,7 +755,7 @@ function createBillingCommands(service,{log=()=>{}}={}) {
     record(id,ticket,'pending');
     // Do not keep the host IPC invocation open during browser startup, network
     // navigation or a credential refresh. The main service owns this task.
-    entry.task=Promise.resolve().then(()=>stopped?null:service.action(id,action,page)).then(result=>{
+    entry.task=Promise.resolve().then(()=>stopped?null:service.action(id,action)).then(result=>{
       if(stopped)return;
       record(id,ticket,result?.accepted===true?'accepted':
         COMMAND_ERRORS.has(result?.reason)?result.reason:'action_failed');
@@ -588,4 +771,4 @@ function createBillingCommands(service,{log=()=>{}}={}) {
   function stop(){stopped=true;results.clear();}
   return {submit,status,stop};
 }
-module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,BROWSERS,browserFromProgId,browserExecutable,browserVariant,defaultWindowsBrowser,findBrowser,selectBillingBrowser,playwrightBrowserChannel,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};
+module.exports={billingPage,historyBillingPages,sessionBillingPages,discoverBillingPage,eligible,readBillingAmount,browserEnvironment,BROWSERS,browserFromProgId,browserExecutable,browserVariant,defaultWindowsBrowser,findBrowser,selectBillingBrowser,playwrightBrowserChannel,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};
