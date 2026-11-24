@@ -28,8 +28,12 @@ and the potential impact. Redact all secrets and private account data.
   No automated sign-in, credential extraction or verification bypass is used.
   Provider pages return only a sanitized amount; browser sandboxing is retained.
 - Browser selection reads the current user's HTTPS association without changing
-  it. Only recognized supported browser identifiers and known installed browser
-  executable locations are used; registry command strings are never executed.
+  it. Only recognized browser identifiers and executable basenames are accepted.
+  A local executable may be located through known installation directories or
+  validated Windows registration values. Registry command strings and their
+  arguments are never executed, and the browser is launched without a shell.
+  Detected executable paths stay in the main process and private local binding,
+  not the renderer or metrics cache.
 - Billing Session requires no browser extension, pairing token or local HTTP
   receiver.
 - No billing snapshots, browser profiles or environment secrets are distributed

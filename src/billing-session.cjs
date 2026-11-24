@@ -13,8 +13,36 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const PROVIDERS = new Set(['codex','opencode']);
-const CHANNELS = ['msedge','chrome'];
-const ACTIONS = ['open','open_edge','open_chrome','confirm','disconnect'];
+const BROWSERS = Object.freeze({
+  msedge: {name:'Microsoft Edge',prog:['MSEdgeHTM'],exe:'msedge.exe',dirs:['Microsoft/Edge/Application'],pw:'msedge'},
+  chrome: {name:'Google Chrome',prog:['ChromeHTML'],exe:'chrome.exe',dirs:['Google/Chrome/Application'],pw:'chrome'},
+  brave: {name:'Brave',prog:['BraveHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser/Application']},
+  opera: {name:'Opera',prog:['OperaStable'],exe:'opera.exe',dirs:['Opera','Programs/Opera']},
+  'opera-gx': {name:'Opera GX',prog:['OperaGXStable'],exe:'opera.exe',dirs:['Opera GX','Programs/Opera GX']},
+  vivaldi: {name:'Vivaldi',prog:['VivaldiHTM','VivaldiHTML'],exe:'vivaldi.exe',dirs:['Vivaldi/Application','Programs/Vivaldi/Application']},
+  chromium: {name:'Chromium',prog:['ChromiumHTM','ChromiumHTML'],exe:'chrome.exe',dirs:['Chromium/Application','Chromium','Programs/Chromium/Application']},
+  yandex: {name:'Yandex Browser',prog:['YandexHTML','YandexBrowserHTML'],exe:'browser.exe',dirs:['Yandex/YandexBrowser/Application']},
+  'msedge-beta': {name:'Edge Beta',prog:['MSEdgeBHTML'],exe:'msedge.exe',dirs:['Microsoft/Edge Beta/Application'],pw:'msedge-beta'},
+  'msedge-dev': {name:'Edge Dev',prog:['MSEdgeDHTML'],exe:'msedge.exe',dirs:['Microsoft/Edge Dev/Application'],pw:'msedge-dev'},
+  'msedge-canary': {name:'Edge Canary',prog:['MSEdgeSSHTM'],exe:'msedge.exe',dirs:['Microsoft/Edge SxS/Application'],pw:'msedge-canary'},
+  'chrome-beta': {name:'Chrome Beta',prog:['ChromeBHTML'],exe:'chrome.exe',dirs:['Google/Chrome Beta/Application'],pw:'chrome-beta'},
+  'chrome-dev': {name:'Chrome Dev',prog:['ChromeDHTML'],exe:'chrome.exe',dirs:['Google/Chrome Dev/Application'],pw:'chrome-dev'},
+  'chrome-canary': {name:'Chrome Canary',prog:['ChromeSSHTM'],exe:'chrome.exe',dirs:['Google/Chrome SxS/Application'],pw:'chrome-canary'},
+  'brave-beta': {name:'Brave Beta',prog:['BraveBHTML','BraveBetaHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser-Beta/Application']},
+  'brave-dev': {name:'Brave Dev',prog:['BraveDHTML','BraveDevHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser-Dev/Application']},
+  'brave-nightly': {name:'Brave Nightly',prog:['BraveNHTML','BraveNightlyHTML'],exe:'brave.exe',dirs:['BraveSoftware/Brave-Browser-Nightly/Application']},
+  'opera-beta': {name:'Opera Beta',prog:['OperaNext','OperaBeta'],exe:'opera.exe',dirs:['Opera beta','Programs/Opera beta']},
+  'opera-developer': {name:'Opera Developer',prog:['OperaDeveloper'],exe:'opera.exe',dirs:['Opera developer','Programs/Opera developer']},
+  'vivaldi-snapshot': {name:'Vivaldi Snapshot',prog:['VivaldiSnapshotHTM'],exe:'vivaldi.exe',dirs:['Vivaldi Snapshot/Application','VivaldiSnapshot/Application']},
+  thorium: {name:'Thorium',prog:['ThoriumHTM','ThoriumHTML'],exe:'thorium.exe',dirs:['Thorium/Application','Thorium','Programs/Thorium/Application']},
+  slimjet: {name:'Slimjet',prog:['SlimjetHTML','SlimjetHTM'],exe:'slimjet.exe',dirs:['Slimjet']},
+  cent: {name:'Cent Browser',prog:['CentBrowserHTML','CentBrowserHTM'],exe:'chrome.exe',dirs:['CentBrowser/Application']},
+  'coc-coc': {name:'Coc Coc',prog:['CocCocHTML','CocCocHTM'],exe:'browser.exe',dirs:['CocCoc/Browser/Application']},
+  'avast-secure': {name:'Avast Secure Browser',prog:['AvastHTML','AvastSecureBrowserHTML'],exe:'AvastBrowser.exe',dirs:['AVAST Software/Browser/Application']},
+  'avg-secure': {name:'AVG Secure Browser',prog:['AVGHTML','AVGSecureBrowserHTML'],exe:'AVGBrowser.exe',dirs:['AVG/Browser/Application']}
+});
+const CHANNELS = Object.keys(BROWSERS);
+const ACTIONS = ['open','open_edge',...CHANNELS.map(id=>'open_'+id),'confirm','disconnect'];
 const CHOICE_STATES = ['choose_edge','choose_chrome','choose_browser'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
 const STATES = ['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale',
@@ -90,58 +118,134 @@ function browserEnvironment(env) {
     'processor_architecture','os','home','display','wayland_display','xdg_runtime_dir','lang']);
   return Object.fromEntries(Object.entries(env||{}).filter(([k,v])=>names.has(k.toLowerCase())&&typeof v==='string'));
 }
-// Read the current user's HTTPS association, not the machine-wide default.
-// Treat missing/unknown associations as unsupported; do not execute registry
-// command strings or change the user's Windows default-browser settings.
+// Read the current user's HTTPS association. Registry command strings are
+// never executed: only an existing, local .exe with an allowlisted browser
+// basename is extracted. Unknown apps and unsupported engines fail closed.
 function browserFromProgId(value) {
-  const id=String(value||'').trim();
-  if(/^MSEdgeHTM(?:\.[A-Za-z0-9_-]+)?$/i.test(id))return 'msedge';
-  if(/^ChromeHTML(?:\.[A-Za-z0-9_-]+)?$/i.test(id))return 'chrome';
+  const id=String(value||'').trim().toLowerCase();
+  for(const [key,spec] of Object.entries(BROWSERS)){
+    if(spec.prog.some(p=>id===p.toLowerCase()||id.startsWith(p.toLowerCase()+'.')))return key;
+  }
   return null;
 }
-async function defaultWindowsBrowser(env=process.env,platform=process.platform,execFile=require('node:child_process').execFile) {
-  if(platform!=='win32')return null;
+function registryValue(stdout,name=''){
+  const line=String(stdout||'').split(/\r?\n/).find(line=>{
+    const m=line.match(/^\s*(.*?)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i);
+    return m&&(name?m[1].trim().toLowerCase()===name.toLowerCase():true);
+  });
+  return line?.match(/^\s*(.*?)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i)?.[2]||null;
+}
+function registryQuery(key,value,env=process.env,platform=process.platform,execFile=require('node:child_process').execFile){
+  if(platform!=='win32')return Promise.resolve(null);
   const systemRoot=env.SystemRoot||env.SYSTEMROOT||env.WINDIR;
-  if(typeof systemRoot!=='string'||!path.win32.isAbsolute(systemRoot)||systemRoot.startsWith('\\\\'))return null;
+  if(typeof systemRoot!=='string'||!path.win32.isAbsolute(systemRoot)||systemRoot.startsWith('\\\\'))return Promise.resolve(null);
   const exe=path.win32.join(systemRoot,'System32','reg.exe');
-  const key='HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice';
   return new Promise(resolve=>{
     try{
-      execFile(exe,['query',key,'/v','ProgId'],{shell:false,windowsHide:true,timeout:3000,maxBuffer:16384,env:browserEnvironment(env)},(error,stdout)=>{
-        if(error){resolve(null);return;}
-        const match=String(stdout||'').match(/^\s*ProgId\s+REG_SZ\s+([^\r\n]+)\s*$/mi);
-        resolve(browserFromProgId(match?.[1]));
+      execFile(exe,['query',key,...(value?['/v',value]:['/ve'])],{shell:false,windowsHide:true,timeout:3000,maxBuffer:16384,env:browserEnvironment(env)},(error,stdout)=>{
+        resolve(error?null:registryValue(stdout,value));
       });
     }catch{resolve(null);}
   });
 }
-async function findBrowser(preferred=null,env=process.env,access=fs.access) {
+function browserExecutable(command,env={}){
+  if(typeof command!=='string'||command.length>8192)return null;
+  const m=command.trim().match(/^(?:"([^"]+\.exe)"|([A-Za-z]:\\.*?\.exe))(?=\s|$)/i);
+  if(!m)return null;
+  const expanded=(m[1]||m[2]).replace(/%([A-Za-z0-9_()]+)%/g,(whole,key)=>{
+    const found=Object.entries(env).find(([name])=>name.toLowerCase()===key.toLowerCase());
+    return typeof found?.[1]==='string'?found[1]:whole;
+  });
+  // No UNC/network paths, shell syntax, alternate streams or relative paths.
+  if(!/^[A-Za-z]:\\[^<>"|?*\x00-\x1f]+\.exe$/i.test(expanded)||expanded.slice(2).includes(':')||expanded.includes('%'))return null;
+  return path.win32.normalize(expanded);
+}
+function browserMatchesPath(channel,executablePath){
+  const spec=BROWSERS[channel];
+  if(!spec||typeof executablePath!=='string')return false;
+  return path.win32.basename(executablePath).toLowerCase()===spec.exe.toLowerCase();
+}
+function browserVariant(channel,executablePath){
+  if(!channel||!executablePath)return channel;
+  const normalized=executablePath.replace(/\\/g,'/').toLowerCase();
+  // Some installations share a base ProgId across releases. Prefer the exact
+  // known installation directory if it identifies a variant of this family.
+  const family=channel.replace(/-(?:beta|dev|canary|nightly|developer|snapshot)$/,'');
+  const candidates=CHANNELS.filter(id=>id===family||id.startsWith(family+'-')).sort((a,b)=>b.length-a.length);
+  for(const id of candidates)if(browserMatchesPath(id,executablePath)&&BROWSERS[id].dirs.some(dir=>normalized.endsWith('/'+dir.toLowerCase()+'/'+BROWSERS[id].exe.toLowerCase())))return id;
+  return channel;
+}
+async function defaultWindowsBrowser(env=process.env,platform=process.platform,execFile=require('node:child_process').execFile){
+  const query=(key,value)=>registryQuery(key,value,env,platform,execFile);
+  const key='HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice';
+  const prog=await query(key,'ProgId');
+  const channel=browserFromProgId(prog);
+  if(!channel)return null;
+  // Do not interpolate untrusted registry key syntax.
+  if(!/^[A-Za-z0-9_.-]{1,150}$/.test(prog))return {channel};
+  const command=await query('HKCR\\'+prog+'\\shell\\open\\command','');
+  let executablePath=browserExecutable(command,env);
+  // Older Opera registrations point to a launcher; prefer the actual browser
+  // executable, not a launcher that may spawn a second process.
+  if(executablePath&&/^opera(?:-|$)/.test(channel)&&path.win32.basename(executablePath).toLowerCase()==='launcher.exe')
+    executablePath=path.win32.join(path.win32.dirname(executablePath),'opera.exe');
+  const resolved=browserVariant(channel,executablePath);
+  return browserMatchesPath(resolved,executablePath)?{channel:resolved,executablePath}:{channel:resolved};
+}
+async function findBrowser(preferred=null,env=process.env,access=fs.access){
   const roots=[env['ProgramFiles(x86)'],env.ProgramW6432,env.ProgramFiles,env.LOCALAPPDATA]
     .filter(x=>typeof x==='string'&&path.isAbsolute(x));
   for(const channel of preferred?[preferred]:CHANNELS){
-    if(!CHANNELS.includes(channel))continue;
-    const relative=channel==='msedge'?['Microsoft','Edge','Application','msedge.exe']:['Google','Chrome','Application','chrome.exe'];
-    for(const root of new Set(roots)){
-      const executablePath=path.join(root,...relative);
+    const spec=BROWSERS[channel];
+    if(!spec)continue;
+    for(const root of new Set(roots))for(const relative of spec.dirs){
+      const executablePath=path.join(root,...relative.split('/'),spec.exe);
       try{await access(executablePath);return {channel,executablePath};}catch{}
     }
   }
   return null;
 }
-// For a new session prefer the supported system default. If it is not
-// available, return only installed alternatives and wait for an explicit choice.
-async function selectBillingBrowser({preferred=null,explicit=null,env=process.env,browserFinder=findBrowser,defaultBrowser=defaultWindowsBrowser}={}) {
-  const selected=explicit||preferred||(await defaultBrowser(env));
+async function findRegisteredBrowser(channel,env=process.env,access=fs.access){
+  // App Paths is useful for non-standard installations, but shared exe names
+  // (chrome.exe, browser.exe, etc.) cannot safely identify a browser variant.
+  const spec=BROWSERS[channel];
+  if(!spec||CHANNELS.filter(id=>BROWSERS[id].exe.toLowerCase()===spec.exe.toLowerCase()).length!==1)return null;
+  for(const hive of ['HKCU','HKLM']){
+    const raw=await registryQuery(hive+'\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\'+spec.exe,'',env);
+    const executablePath=browserExecutable(raw,env);
+    if(!browserMatchesPath(channel,executablePath))continue;
+    try{await access(executablePath);return {channel,executablePath};}catch{}
+  }
+  return null;
+}
+async function selectBillingBrowser({preferred=null,explicit=null,env=process.env,browserFinder=findBrowser,defaultBrowser=defaultWindowsBrowser,access=fs.access}={}){
+  // A bound or explicitly selected browser takes precedence over Windows.
+  // A new session uses the exact registered executable when available.
+  const detected=await defaultBrowser(env);
+  const system=typeof detected==='string'?{channel:detected}:detected;
+  const selected=explicit||preferred||system?.channel;
   if(CHANNELS.includes(selected)){
+    if(system?.channel===selected&&browserMatchesPath(selected,system.executablePath)){
+      try{await access(system.executablePath);return {browser:system,state:null,choices:[]};}catch{}
+    }
     const browser=await browserFinder(selected,env);
-    if(browser?.channel===selected)return {browser,state:null};
+    if(browser?.channel===selected)return {browser,state:null,choices:[]};
+    if(browserFinder===findBrowser){
+      const registered=await findRegisteredBrowser(selected,env,access);
+      if(registered)return {browser:registered,state:null,choices:[]};
+    }
   }
   const available=await Promise.all(CHANNELS.map(async channel=>{
     const browser=await browserFinder(channel,env);
     return browser?.channel===channel?channel:null;
   }));
   const choices=available.filter(Boolean);
-  return {browser:null,state:choices.length===2?'choose_browser':choices[0]==='msedge'?'choose_edge':choices[0]==='chrome'?'choose_chrome':'browser_missing'};
+  return {browser:null,state:choices.length?'choose_browser':'browser_missing',choices};
+}
+function playwrightBrowserChannel(channel){
+  // Playwright recognizes only its branded channels and "chromium". Other
+  // Chromium derivatives must be launched using their own executablePath.
+  return BROWSERS[channel]?.pw||'chromium';
 }
 function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:child_process').spawn}) {
   // The installed browser handles the provider's own OAuth flow. Do not use
@@ -188,26 +292,26 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     return snapshot.accounts.find(a=>a.id===id&&eligible(a))||null;
   };
   const stateFor=(snapshot,id,provider)=>snapshot.billingSessions?.find(s=>s.id===id&&s.provider===provider);
-  async function publish(account,state,{amount=null,checkedAt=0,preserve=false}={}){
+  async function publish(account,state,{amount=null,checkedAt=0,preserve=false,browser=null,choices=[]}={}){
     if(stopped)return store.cached();
-    if(preserve){
-      const old=stateFor(await store.cached(),account.id,account.provider);
-      if(Number.isFinite(old?.amount)){amount=old.amount;checkedAt=old.checkedAt;}
-    }
-    return store.setBillingSession(account.id,account.provider,{id:account.id,provider:account.provider,state,amount,checkedAt});
+    const old=stateFor(await store.cached(),account.id,account.provider);
+    if(preserve&&Number.isFinite(old?.amount)){amount=old.amount;checkedAt=old.checkedAt;}
+    return store.setBillingSession(account.id,account.provider,{id:account.id,provider:account.provider,state,amount,checkedAt,
+      browser:browser||old?.browser||null,browserChoices:choices});
   }
   async function readBinding(account){
     try{
       const b=JSON.parse(await io.readFile(bindingFile(account),'utf8'));
       if(b?.id===account.id&&b.provider===account.provider&&CHANNELS.includes(b.channel)&&
-        typeof b.url==='string'&&billingPage(account.provider,b.url)===b.url)return b;
+        typeof b.url==='string'&&billingPage(account.provider,b.url)===b.url)
+        return {...b,executablePath:browserMatchesPath(b.channel,b.executablePath)&&browserExecutable('"'+b.executablePath+'"')===b.executablePath?b.executablePath:null};
     }catch{}
     return null;
   }
   async function saveBinding(account,b){
     await io.mkdir(folder(account),{recursive:true,mode:0o700});
     const temp=bindingFile(account)+'.tmp';
-    await io.writeFile(temp,JSON.stringify({id:account.id,provider:account.provider,channel:b.channel,url:b.url}),{encoding:'utf8',mode:0o600});
+    await io.writeFile(temp,JSON.stringify({id:account.id,provider:account.provider,channel:b.channel,url:b.url,executablePath:b.executablePath||null}),{encoding:'utf8',mode:0o600});
     await io.rename(temp,bindingFile(account));
   }
   async function closeContext(context){
@@ -222,7 +326,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     catch{throw new Error('profile_error');}
     let context;
     try{context=await chromium.launchPersistentContext(profile(account,browser.channel),{
-      channel:browser.channel,executablePath:browser.executablePath,headless:true,
+      channel:playwrightBrowserChannel(browser.channel),executablePath:browser.executablePath,headless:true,
       viewport:null,acceptDownloads:false,chromiumSandbox:true,timeout:15000,
       handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,
       args:['--disable-background-mode','--disable-sync'],env:browserEnvironment(env)
@@ -292,20 +396,26 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     try{
       // Check availability without launching an automated browser.
       try{if(!chromiumLoader()?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
-      const selected=await selectBillingBrowser({
-        preferred:existing?.browser.channel??old?.channel??null,explicit,env,browserFinder,defaultBrowser
+      let selected;
+      // Keep the exact executable of an already confirmed non-standard install.
+      const saved=existing?.browser||old;
+      if(!explicit&&saved?.executablePath&&browserMatchesPath(saved.channel,saved.executablePath)){
+        try{await io.access(saved.executablePath);selected={browser:{channel:saved.channel,executablePath:saved.executablePath}};}catch{}
+      }
+      if(!selected)selected=await selectBillingBrowser({
+        preferred:saved?.channel??null,explicit,env,browserFinder,defaultBrowser
       });
-      if(!selected.browser)return publish(account,selected.state);
+      if(!selected.browser)return publish(account,selected.state,{choices:selected.choices});
       const browser=selected.browser;
       await io.rm(bindingFile(account),{force:true}).catch(()=>{throw new Error('profile_error');});
-      await publish(account,'connecting');
+      await publish(account,'connecting',{browser:browser.channel});
       const profilePath=profile(account,browser.channel);
       try{await io.mkdir(profilePath,{recursive:true,mode:0o700});}
       catch{throw new Error('profile_error');}
       const url=existing?.url||old?.url||ENTRY[account.provider];
       const process=await loginLauncher({browser,profilePath,url,env});
       manual.set(account.id,{browser,process,url});
-      return publish(account,'awaiting_confirmation');
+      return publish(account,'awaiting_confirmation',{browser:browser.channel});
     }catch(e){return publish(account,safeError(e));}
   }
   async function confirm(account,rawPage){
@@ -323,9 +433,9 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       await closeContext(context);context=null;
       if(!await current(account.id))throw new Error('profile_error');
       if(result.state!=='ok')return publish(account,result.state==='login_required'?'login_required':'confirmation_unavailable');
-      await saveBinding(account,{channel:record.browser.channel,url:result.url});
+      await saveBinding(account,{channel:record.browser.channel,url:result.url,executablePath:record.browser.executablePath});
       manual.delete(account.id);
-      return publish(account,'ok',{amount:result.amount,checkedAt:clock()});
+      return publish(account,'ok',{amount:result.amount,checkedAt:clock(),browser:record.browser.channel});
     }catch(e){return publish(account,safeError(e));}
     finally{if(context)await closeContext(context).catch(()=>{});}
   }
@@ -354,12 +464,16 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     }
     let context;
     try{
-      const browser=await browserFinder(binding.channel,env);
+      let browser=null;
+      if(binding.executablePath){
+        try{await io.access(binding.executablePath);browser={channel:binding.channel,executablePath:binding.executablePath};}catch{}
+      }
+      if(!browser)browser=await browserFinder(binding.channel,env);
       if(!browser)throw new Error('browser_missing');
       context=await launch(account,browser);
       const result=await navigateBilling(context,account,binding.url);
       if(!await current(account.id))return;
-      if(result.state==='ok')await publish(account,'ok',{amount:result.amount,checkedAt:clock()});
+      if(result.state==='ok')await publish(account,'ok',{amount:result.amount,checkedAt:clock(),browser:browser.channel});
       else await publish(account,result.state,{preserve:true});
     }catch(e){await publish(account,safeError(e),{preserve:true});}
     finally{if(context)await closeContext(context).catch(()=>{});}
@@ -392,7 +506,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       await run(account,async()=>{
         executed=true;
         return verb==='confirm'?confirm(account,page):verb==='disconnect'?disconnect(account):
-          open(account,verb==='open_edge'?'msedge':verb==='open_chrome'?'chrome':null);
+          open(account,verb==='open_edge'?'msedge':verb.startsWith('open_')?verb.slice(5):null);
       },true);
       return executed?reply(true):reply(false,'account_unavailable');
     }catch{return reply(false,'action_failed');}
@@ -474,4 +588,4 @@ function createBillingCommands(service,{log=()=>{}}={}) {
   function stop(){stopped=true;results.clear();}
   return {submit,status,stop};
 }
-module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,browserFromProgId,defaultWindowsBrowser,findBrowser,selectBillingBrowser,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};
+module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,BROWSERS,browserFromProgId,browserExecutable,browserVariant,defaultWindowsBrowser,findBrowser,selectBillingBrowser,playwrightBrowserChannel,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};

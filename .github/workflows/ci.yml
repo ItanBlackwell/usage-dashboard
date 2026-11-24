@@ -157,22 +157,41 @@ jobs:
         run: |
           node <<'NODE'
           const assert=require('node:assert/strict');
-          const {browserFromProgId,defaultWindowsBrowser,selectBillingBrowser,createBillingSessions}=require('./src/billing-session.cjs');
+          const {BROWSERS,browserFromProgId,browserExecutable,browserVariant,defaultWindowsBrowser,selectBillingBrowser,playwrightBrowserChannel,createBillingSessions}=require('./src/billing-session.cjs');
           (async()=>{
             assert.equal(browserFromProgId('ChromeHTML'),'chrome');
             assert.equal(browserFromProgId('MSEdgeHTM'),'msedge');
             assert.equal(browserFromProgId('FirefoxURL-123'),null);
-            assert.equal(browserFromProgId('BraveHTML'),null);
+            assert.equal(browserFromProgId('BraveHTML'),'brave');
+            assert.equal(browserFromProgId('BraveHTML.1234'),'brave');
+            assert.equal(browserFromProgId('ChromeBHTML'),'chrome-beta');
+            assert.equal(browserFromProgId('MSEdgeDHTML'),'msedge-dev');
+            assert.equal(browserFromProgId('OperaGXStable'),'opera-gx');
+            assert.equal(browserFromProgId('VivaldiHTM'),'vivaldi');
+            assert.equal(browserFromProgId('ChromiumHTM.abc'),'chromium');
+            assert.equal(browserFromProgId('YandexHTML'),'yandex');
+            assert.equal(Object.keys(BROWSERS).length,26);
+            assert.equal(playwrightBrowserChannel('brave'),'chromium');
+            assert.equal(playwrightBrowserChannel('opera-gx'),'chromium');
+            assert.equal(playwrightBrowserChannel('chrome-beta'),'chrome-beta');
             const defaultBrowser=async()=> 'chrome';
             const env={SystemRoot:'C:\\Windows',OPENAI_API_KEY:'not-for-child'};
             const channel=await defaultWindowsBrowser(env,'win32',(exe,args,opts,done)=>{
               assert.equal(exe,'C:\\Windows\\System32\\reg.exe');
-              assert.ok(args[1].includes('\\https\\UserChoice'));
               assert.equal(opts.shell,false);
               assert.equal(opts.env.OPENAI_API_KEY,undefined);
-              done(null,'    ProgId    REG_SZ    ChromeHTML\r\n');
+              if(args[1].includes('\\https\\UserChoice'))done(null,'    ProgId    REG_SZ    BraveHTML.123\r\n');
+              else{
+                assert.equal(args[1],'HKCR\\BraveHTML.123\\shell\\open\\command');
+                done(null,'    (Default)    REG_SZ    "D:\\Browsers\\Brave\\brave.exe" -- "%1"\r\n');
+              }
             });
-            assert.equal(channel,'chrome');
+            assert.equal(channel.channel,'brave');
+            assert.equal(channel.executablePath,'D:\\Browsers\\Brave\\brave.exe');
+            assert.equal(browserExecutable('"C:\\Apps\\evil.exe" "%1"'),'C:\\Apps\\evil.exe');
+            assert.equal(browserExecutable('cmd.exe /c evil'),null);
+            assert.equal(browserExecutable('"\\\\server\\share\\brave.exe" "%1"'),null);
+            assert.equal(browserVariant('brave','C:\\Program Files\\BraveSoftware\\Brave-Browser-Beta\\Application\\brave.exe'),'brave-beta');
             assert.equal(await defaultWindowsBrowser(env,'linux',()=>{throw Error('unexpected');}),null);
             const available=new Set(['msedge','chrome']);
             const browserFinder=async channel=>available.has(channel)?{channel,executablePath:channel+'.exe'}:null;
@@ -180,9 +199,12 @@ jobs:
             assert.equal((await select()).browser.channel,'chrome');
             assert.equal((await select({preferred:'msedge'})).browser.channel,'msedge');
             assert.equal((await select({explicit:'msedge'})).browser.channel,'msedge');
-            assert.equal((await select({defaultBrowser:async()=>null})).state,'choose_browser');
+            assert.deepEqual((await select({defaultBrowser:async()=>null})).choices,['msedge','chrome']);
+            const custom=await select({defaultBrowser:async()=>channel,access:async()=>{}});
+            assert.equal(custom.browser.channel,'brave');
+            assert.equal(custom.browser.executablePath,channel.executablePath);
             available.delete('chrome');
-            assert.equal((await select()).state,'choose_edge');
+            assert.deepEqual((await select()).choices,['msedge']);
             assert.equal((await select({explicit:'msedge'})).browser.channel,'msedge');
             available.clear();
             assert.equal((await select()).state,'browser_missing');
@@ -197,7 +219,9 @@ jobs:
               loginLauncher:async({browser})=>{assert.equal(browser.channel,'msedge');launches++;return {isRunning:()=>false};}
             });
             try{
-              assert.equal((await service.action(account.id,'open')).snapshot.billingSessions[0].state,'choose_edge');
+              const choice=await service.action(account.id,'open');
+              assert.equal(choice.snapshot.billingSessions[0].state,'choose_browser');
+              assert.deepEqual(choice.snapshot.billingSessions[0].browserChoices,['msedge']);
               assert.equal(launches,0);
               assert.equal((await service.action(account.id,'open_edge')).snapshot.billingSessions[0].state,'awaiting_confirmation');
               assert.equal(launches,1);
@@ -315,7 +339,7 @@ jobs:
           const path=require('node:path');
           const fs=require('node:fs/promises');
           const {chromium}=require(path.join(process.env.USAGE_DASHBOARD_SMOKE_PLUGIN,'node_modules','playwright-core'));
-          const {findBrowser,browserEnvironment,readBillingAmount}=require('./src/billing-session.cjs');
+          const {findBrowser,browserEnvironment,readBillingAmount,playwrightBrowserChannel}=require('./src/billing-session.cjs');
           (async()=>{
             const browser=await findBrowser();
             if(!browser)throw Error('No supported browser on Windows runner');
@@ -323,7 +347,7 @@ jobs:
             let context;
             try{
               context=await chromium.launchPersistentContext(profile,{
-                channel:browser.channel,executablePath:browser.executablePath,headless:true,
+                channel:playwrightBrowserChannel(browser.channel),executablePath:browser.executablePath,headless:true,
                 viewport:null,acceptDownloads:false,chromiumSandbox:true,timeout:15000,
                 handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,
                 args:['--disable-background-mode','--disable-sync'],env:browserEnvironment(process.env)

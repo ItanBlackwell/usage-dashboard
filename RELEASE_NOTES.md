@@ -8,8 +8,10 @@ Public-release preparation for Usage Dashboard. This release is **not published*
 - Compact sidebar rings, live account overview, quota refresh, and latest-wins
   switching between saved accounts.
 - Persistent cache and optional per-account Billing Sessions for OpenAI API
-  and OpenCode Zen using the supported Windows default browser (Edge or Chrome),
+  and OpenCode Zen using the recognized Windows default Chromium browser,
   or an explicitly chosen installed alternative, without a browser extension.
+  Detection includes Brave, Opera GX, Opera, Vivaldi and other Chromium
+  derivatives; third-party Chromium launch compatibility remains experimental.
   The previous browser companion and its local HTTP receiver are removed.
 
 ## Installation (Windows)

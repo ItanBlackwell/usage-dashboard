@@ -44,10 +44,13 @@ See [Installation and troubleshooting](docs/INSTALLATION.md) for details.
 ### Enable OpenAI and OpenCode Zen API balances (without an extension)
 
 The installer prepares the optional Billing Session runtime. A new session
-uses the current Windows default browser if it is Microsoft Edge or Google
-Chrome. If the default is unsupported or unavailable, choose an installed
-supported browser in the account card. Existing sessions retain their saved
-browser. No Developer mode or browser extension is necessary.
+uses the current Windows default browser if it is a recognized installed
+Chromium browser. The browser catalog includes Edge, Chrome, Brave, Opera,
+Opera GX, Vivaldi, Chromium, Yandex Browser and additional Chromium derivatives,
+including several preview channels. Non-Edge/Chrome browsers are experimental.
+If the default is unsupported or unavailable, choose an installed compatible
+browser in the account card. Existing sessions retain their saved browser.
+No Developer mode or browser extension is necessary.
 **Manual authorization is still required:**
 
 1. Restart OpenCode and click **Connect Billing** on the OpenAI API or Zen API card.

@@ -29,13 +29,13 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
   month:Schema.String,state:Schema.String,message:Schema.String,usdSpent:Schema.NullOr(Schema.Number),
   monthlyBudgetUsd:Schema.NullOr(Schema.Number),usdRemainingBudget:Schema.NullOr(Schema.Number),
   limitType:Schema.String,checkedAt:Schema.Number });
-const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number});
+const BillingSessionSchema = Schema.Struct({id:Schema.String,provider:Schema.String,state:Schema.String,amount:Schema.NullOr(Schema.Number),checkedAt:Schema.Number,browser:Schema.NullOr(Schema.String),browserChoices:Schema.Array(Schema.String)});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
   inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number,billingSessions:Schema.Array(BillingSessionSchema) });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v2',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v3',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 // Version independently from the metrics contract. Older host clients may
 // retain method tables for an existing token across plugin reloads.
-const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v3',methods:{
+const BillingCommands=Ipc.define({id:'usage-dashboard.billing.v4',methods:{
   ping:{output:Schema.String},
   submit:{input:Schema.Struct({id:Schema.String,action:Schema.String,ticket:Schema.String,page:Schema.String}),output:Schema.String},
   status:{input:Schema.Struct({id:Schema.String,ticket:Schema.String}),output:Schema.String}
@@ -227,7 +227,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     login_required:tr('Sign-in required. Reconnect in the normal browser.','Требуется вход. Переподключи Billing в обычном браузере.'),
     balance_unavailable:tr('Billing balance unavailable','Баланс Billing недоступен'),
     runtime_missing:tr('Billing runtime missing. Reinstall the plugin.','Нет модуля Billing. Переустанови плагин.'),
-    browser_missing:tr('Microsoft Edge or Google Chrome required.','Нужен Microsoft Edge или Chrome.'),
+    browser_missing:tr('No compatible installed Chromium browser found.','Не найден совместимый установленный Chromium-браузер.'),
     browser_error:tr('Could not launch Billing browser.','Не удалось запустить браузер Billing.'),
     browser_timeout:tr('Browser launch timed out.','Истекло время запуска браузера.'),
     profile_busy:tr('Billing profile is in use. Close its browser and retry.','Профиль Billing занят. Закрой его браузер и повтори.'),
@@ -254,10 +254,11 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
   line.setAttribute('data-pv-billing-session',status||'disconnected');
   const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
+  const browserName=billing.BROWSERS[session?.browser]?.name;
   const waiting=['awaiting_confirmation','confirmation_unavailable','close_login_browser','profile_busy'].includes(status);
   const busy=pending||status==='connecting';
   const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
-  if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback));
+  if(feedback)add(line,$('span','font-size:10px;line-height:12px;min-width:0;flex:1 1 100%;color:'+(actionError?palette.danger:palette.muted),feedback+(browserName&&!choosing?' · '+browserName:'')));
   let pageInput=null;
   if(waiting){
     pageInput=add(line,$('input','box-sizing:border-box;flex:1 1 100%;min-width:0;width:100%;height:22px;min-height:22px;padding:0 5px;font:inherit;font-size:10px;border:1px solid '+palette.border+';border-radius:4px;color:'+palette.text+';background:transparent'));
@@ -281,8 +282,12 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb,verb==='confirm'?(pageInput?.value||''):'');});
   };
   if(choosing){
-    if(status!=='choose_chrome')button('open_edge',tr('Use Edge','Использовать Edge'),tr('Open a dedicated Microsoft Edge profile.','Открыть отдельный профиль Microsoft Edge.'));
-    if(status!=='choose_edge')button('open_chrome',tr('Use Chrome','Использовать Chrome'),tr('Open a dedicated Google Chrome profile.','Открыть отдельный профиль Google Chrome.'));
+    const choices=(session?.browserChoices||[]).filter(id=>Object.hasOwn(billing.BROWSERS,id));
+    // Old cached choice states have no list; use a fresh detection on retry.
+    for(const id of choices){
+      const name=billing.BROWSERS[id].name;
+      button('open_'+id,name,tr('Open a dedicated profile in '+name+'.','Открыть отдельный профиль в '+name+'.'));
+    }
     button('open',tr('Retry default','Повторить выбор'),tr('Check the default or saved browser again.','Повторно проверить браузер по умолчанию или сохранённый браузер.'));
   }else if(waiting){
     button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only after closing the login browser and checking that the copied Billing page matches this API key.','Подтверди только после закрытия окна входа и проверки соответствия адреса Billing этому API-ключу.'));
@@ -548,7 +553,7 @@ function createView(ctx,client,{compact=false,billingClient=null}={}) {
     let stage='ping';
     try{
       const version=await bounded(signal=>billingClient.ping({signal}),8000);
-      if(version!=='billing-v3'){billingUiErrors.set(id,'ipc_protocol');return;}
+      if(version!=='billing-v4'){billingUiErrors.set(id,'ipc_protocol');return;}
       stage='submit';
       const ack=await bounded(signal=>billingClient.submit({id,action,ticket,page},{signal}),10000);
       if(ack!=='queued'){
@@ -976,11 +981,11 @@ exports.default=Plugin.define({
     // scalar acknowledgements/statuses. Failures must not disable metrics.
     try{
       ctx.provide(BillingCommands,{
-        ping:()=> 'billing-v3',
+        ping:()=> 'billing-v4',
         submit:input=>billingCommands.submit(input),
         status:input=>billingCommands.status(input)
       });
-      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v3'});}catch{}
+      try{ctx.log?.write?.('info','Usage Dashboard Billing IPC ready',{protocol:'billing-v4'});}catch{}
     }catch{
       try{ctx.log?.write?.('warn','Usage Dashboard Billing IPC registration failed',{code:'B02'});}catch{}
     }

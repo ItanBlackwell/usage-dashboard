@@ -20,7 +20,10 @@ function sanitizeBillingSessions(value,accounts) {
     const valid=typeof s.amount==='number'&&Number.isFinite(s.amount)&&s.amount>=(s.provider==='opencode'?0:-1000000)&&s.amount<=100000000;
     const amount=valid&&['ok','stale','login_required','balance_unavailable','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','runtime_missing'].includes(s.state)?s.amount:null;
     const checkedAt=amount!==null&&Number.isFinite(s.checkedAt)&&s.checkedAt>0?s.checkedAt:0;
-    result.set(s.id,{id:s.id,provider:s.provider,state:s.state,amount:checkedAt?amount:null,checkedAt});
+    const safeId=id=>typeof id==='string'&&/^[a-z][a-z0-9-]{0,39}$/.test(id);
+    const browser=safeId(s.browser)?s.browser:null;
+    const browserChoices=Array.isArray(s.browserChoices)?[...new Set(s.browserChoices.filter(safeId))].slice(0,40):[];
+    result.set(s.id,{id:s.id,provider:s.provider,state:s.state,amount:checkedAt?amount:null,checkedAt,browser,browserChoices});
   }
   return [...result.values()];
 }

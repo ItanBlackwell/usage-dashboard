@@ -2,9 +2,11 @@
 
 ## 0.13.0 (unreleased)
 
-- Respect the current Windows default HTTPS browser for new Billing Sessions.
-  Offer an explicit choice of installed Edge or Chrome when it is unavailable
-  or unsupported, and preserve the browser of confirmed sessions.
+- Expand Billing browser detection to 26 Chromium browser variants, including
+  Brave, Opera GX, Opera, Vivaldi, Chromium and preview channels. Prefer the
+  current Windows default HTTPS browser for new sessions, offer detected
+  alternatives and preserve the selected browser of confirmed sessions.
+  Nonstandard Chromium derivatives are experimental.
 
 - Separate ordinary-browser authorization from headless Billing reads. Require
   manual login, closure of the dedicated login profile and explicit confirmation

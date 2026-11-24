@@ -24,8 +24,10 @@ The default installer prepares the optional Playwright Core runtime but does
 not open a browser or install an extension. Use the **Connect Billing** button
 on the desired OpenAI or Zen API card after restarting OpenCode. Sign in
 manually in the separate normal browser window. New sessions use the Windows
-default browser if it is a supported installed Edge or Chrome; otherwise,
-choose an available supported browser in the account card. Select the correct
+default browser if it is a recognized installed Chromium browser; otherwise,
+choose a detected compatible browser in the account card. Brave, Opera, Opera GX,
+Vivaldi and other Chromium derivatives are experimental. See the browser catalog
+in [Billing Session](BILLING_SESSION.md). Select the correct
 billing organization/workspace, and copy the Billing page address. Close all
 windows of that login profile. Paste the address in Usage Dashboard and click
 **Confirm account**. Automated reading starts only after manual login.

@@ -3,12 +3,40 @@
 Billing Session is the optional way to read a visible prepaid USD
 balance without a browser extension. Each connected API account has a separate
 persistent browser profile. A new session uses the current user's Windows
-default HTTPS browser if it is Microsoft Edge or Google Chrome and its
-executable is available. Otherwise, Usage Dashboard asks the user to choose
-from the supported browsers it finds installed. Other browsers, including
-Firefox, Brave, Opera and Vivaldi, are not supported by this implementation.
-The default browser setting is never changed. It does not use your normal
-browser profile or extract credentials from OpenCode.
+default HTTPS browser if it is a recognized Chromium browser and its executable
+is available. Otherwise, Usage Dashboard asks the user to choose from the
+compatible browsers it finds installed. The default browser setting is never
+changed. It does not use your normal browser profile or extract credentials
+from OpenCode.
+
+## Browser catalog (Windows)
+
+| Browser family | Recognized editions |
+| --- | --- |
+| Microsoft Edge | Stable, Beta, Dev, Canary |
+| Google Chrome | Stable, Beta, Dev, Canary |
+| Brave | Stable, Beta, Dev, Nightly |
+| Opera | Stable, GX, Beta, Developer |
+| Vivaldi | Stable, Snapshot |
+| Chromium | Chromium |
+| Other Chromium derivatives | Yandex Browser, Thorium, Slimjet, Cent Browser, Coc Coc, Avast Secure Browser, AVG Secure Browser |
+
+The catalog contains 26 browser variants. The system HTTPS registration and
+known installation paths are used for detection. For a recognized default
+browser installed outside the usual directories, the registered local executable
+may also be used. The account card lists the installed alternatives it detects.
+
+Playwright provides dedicated channels for Chrome and Edge. Other Chromium
+derivatives use their installed executable with the Chromium automation engine.
+These additional browsers are experimental: detection and launch configuration
+do not guarantee that every version, distribution, authentication flow or
+headless billing read will work. Portable or nonstandard installations may
+not be detected if they lack a recognized registration and known executable path.
+
+Stock Firefox, Firefox-based browsers and Safari are not supported by this
+runtime; Playwright requires patched Firefox and WebKit builds rather than the
+ordinary installed browsers. See [Playwright browser compatibility](https://playwright.dev/docs/browsers)
+and [browser launch options](https://playwright.dev/docs/api/class-browsertype#browser-type-launch).
 
 The confirmed session retains its browser even if the system default changes.
 If that browser is no longer available, explicitly choose an installed
