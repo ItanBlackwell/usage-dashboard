@@ -27,6 +27,9 @@ and the potential impact. Redact all secrets and private account data.
   canonical Billing URL is retained in a local binding, not the metrics cache.
   No automated sign-in, credential extraction or verification bypass is used.
   Provider pages return only a sanitized amount; browser sandboxing is retained.
+- Browser selection reads the current user's HTTPS association without changing
+  it. Only recognized supported browser identifiers and known installed browser
+  executable locations are used; registry command strings are never executed.
 - Billing Session requires no browser extension, pairing token or local HTTP
   receiver.
 - No billing snapshots, browser profiles or environment secrets are distributed

@@ -216,6 +216,9 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   const status=session?.state;
   const text={
     connecting:tr('Opening isolated browser…','Открывается отдельный браузер…'),
+    choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
+    choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
+    choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
     awaiting_confirmation:tr('Sign in in the normal browser, open the matching Billing page, copy its address and close the login window.','Войди в обычном браузере, открой нужную страницу Billing, скопируй адрес и закрой окно входа.'),
     confirmation_unavailable:tr('Balance not recognized. Check the copied Billing address and retry.','Баланс не распознан. Проверь адрес Billing и повтори.'),
     close_login_browser:tr('Close all windows of this separate login profile, then confirm.','Закрой все окна отдельного профиля входа, затем подтверди.'),
@@ -250,6 +253,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   };
   const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
   line.setAttribute('data-pv-billing-session',status||'disconnected');
+  const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
   const waiting=['awaiting_confirmation','confirmation_unavailable','close_login_browser','profile_busy'].includes(status);
   const busy=pending||status==='connecting';
   const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
@@ -276,7 +280,11 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     el.setAttribute('data-pv-billing-action',verb);
     el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb,verb==='confirm'?(pageInput?.value||''):'');});
   };
-  if(waiting){
+  if(choosing){
+    if(status!=='choose_chrome')button('open_edge',tr('Use Edge','Использовать Edge'),tr('Open a dedicated Microsoft Edge profile.','Открыть отдельный профиль Microsoft Edge.'));
+    if(status!=='choose_edge')button('open_chrome',tr('Use Chrome','Использовать Chrome'),tr('Open a dedicated Google Chrome profile.','Открыть отдельный профиль Google Chrome.'));
+    button('open',tr('Retry default','Повторить выбор'),tr('Check the default or saved browser again.','Повторно проверить браузер по умолчанию или сохранённый браузер.'));
+  }else if(waiting){
     button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only after closing the login browser and checking that the copied Billing page matches this API key.','Подтверди только после закрытия окна входа и проверки соответствия адреса Billing этому API-ключу.'));
     button('open',tr('Open browser','Открыть браузер'),tr('Reopen the normal login browser if needed.','Повторно открыть обычный браузер для входа.'));
   }else{

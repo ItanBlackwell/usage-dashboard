@@ -1,10 +1,19 @@
 # Billing Session (OpenAI API and OpenCode Zen)
 
 Billing Session is the optional way to read a visible prepaid USD
-balance without a browser extension. It uses the installed Microsoft Edge
-browser first, or Google Chrome if Edge is absent, with a separate persistent
-browser profile for each connected API account. It does not use your normal
+balance without a browser extension. Each connected API account has a separate
+persistent browser profile. A new session uses the current user's Windows
+default HTTPS browser if it is Microsoft Edge or Google Chrome and its
+executable is available. Otherwise, Usage Dashboard asks the user to choose
+from the supported browsers it finds installed. Other browsers, including
+Firefox, Brave, Opera and Vivaldi, are not supported by this implementation.
+The default browser setting is never changed. It does not use your normal
 browser profile or extract credentials from OpenCode.
+
+The confirmed session retains its browser even if the system default changes.
+If that browser is no longer available, explicitly choose an installed
+alternative and sign in again. Browser authentication is not transferred
+between browsers.
 
 ## Installation
 

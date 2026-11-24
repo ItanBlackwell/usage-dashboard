@@ -925,7 +925,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const EMPTY = () => ({accounts:[],organizations:[],inventoryWarning:null,checkedAt:0,billingSessions:[]});
-const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','close_login_browser','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
+const BILLING_STATES=new Set(['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale','choose_edge','choose_chrome','choose_browser','close_login_browser','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error']);
 function sanitizeBillingSessions(value,accounts) {
   if(!Array.isArray(value))return [];
   const eligible=new Map(accounts.filter(a=>a.kind==='api'&&['codex','opencode'].includes(a.provider)&&a.message!=='login_required').map(a=>[a.id,a.provider]));
@@ -1117,9 +1117,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const PROVIDERS = new Set(['codex','opencode']);
 const CHANNELS = ['msedge','chrome'];
+const ACTIONS = ['open','open_edge','open_chrome','confirm','disconnect'];
+const CHOICE_STATES = ['choose_edge','choose_chrome','choose_browser'];
 const ENTRY = {codex:'https://platform.openai.com/settings/organization/billing/overview',opencode:'https://opencode.ai/console'};
 const STATES = ['connecting','awaiting_confirmation','confirmation_unavailable','ok','stale',
-  'close_login_browser','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
+  'choose_edge','choose_chrome','choose_browser','close_login_browser','login_required','balance_unavailable','runtime_missing','browser_missing','browser_error','browser_timeout','profile_busy','browser_access_denied','profile_error','disconnect_error'];
 
 function billingPage(provider,raw) {
   try {
@@ -1191,6 +1193,31 @@ function browserEnvironment(env) {
     'processor_architecture','os','home','display','wayland_display','xdg_runtime_dir','lang']);
   return Object.fromEntries(Object.entries(env||{}).filter(([k,v])=>names.has(k.toLowerCase())&&typeof v==='string'));
 }
+// Read the current user's HTTPS association, not the machine-wide default.
+// Treat missing/unknown associations as unsupported; do not execute registry
+// command strings or change the user's Windows default-browser settings.
+function browserFromProgId(value) {
+  const id=String(value||'').trim();
+  if(/^MSEdgeHTM(?:\.[A-Za-z0-9_-]+)?$/i.test(id))return 'msedge';
+  if(/^ChromeHTML(?:\.[A-Za-z0-9_-]+)?$/i.test(id))return 'chrome';
+  return null;
+}
+async function defaultWindowsBrowser(env=process.env,platform=process.platform,execFile=require('node:child_process').execFile) {
+  if(platform!=='win32')return null;
+  const systemRoot=env.SystemRoot||env.SYSTEMROOT||env.WINDIR;
+  if(typeof systemRoot!=='string'||!path.win32.isAbsolute(systemRoot)||systemRoot.startsWith('\\\\'))return null;
+  const exe=path.win32.join(systemRoot,'System32','reg.exe');
+  const key='HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice';
+  return new Promise(resolve=>{
+    try{
+      execFile(exe,['query',key,'/v','ProgId'],{shell:false,windowsHide:true,timeout:3000,maxBuffer:16384,env:browserEnvironment(env)},(error,stdout)=>{
+        if(error){resolve(null);return;}
+        const match=String(stdout||'').match(/^\s*ProgId\s+REG_SZ\s+([^\r\n]+)\s*$/mi);
+        resolve(browserFromProgId(match?.[1]));
+      });
+    }catch{resolve(null);}
+  });
+}
 async function findBrowser(preferred=null,env=process.env,access=fs.access) {
   const roots=[env['ProgramFiles(x86)'],env.ProgramW6432,env.ProgramFiles,env.LOCALAPPDATA]
     .filter(x=>typeof x==='string'&&path.isAbsolute(x));
@@ -1203,6 +1230,21 @@ async function findBrowser(preferred=null,env=process.env,access=fs.access) {
     }
   }
   return null;
+}
+// For a new session prefer the supported system default. If it is not
+// available, return only installed alternatives and wait for an explicit choice.
+async function selectBillingBrowser({preferred=null,explicit=null,env=process.env,browserFinder=findBrowser,defaultBrowser=defaultWindowsBrowser}={}) {
+  const selected=explicit||preferred||(await defaultBrowser(env));
+  if(CHANNELS.includes(selected)){
+    const browser=await browserFinder(selected,env);
+    if(browser?.channel===selected)return {browser,state:null};
+  }
+  const available=await Promise.all(CHANNELS.map(async channel=>{
+    const browser=await browserFinder(channel,env);
+    return browser?.channel===channel?channel:null;
+  }));
+  const choices=available.filter(Boolean);
+  return {browser:null,state:choices.length===2?'choose_browser':choices[0]==='msedge'?'choose_edge':choices[0]==='chrome'?'choose_chrome':'browser_missing'};
 }
 function startLoginBrowser({browser,profilePath,url,env,spawn=require('node:child_process').spawn}) {
   // The installed browser handles the provider's own OAuth flow. Do not use
@@ -1237,7 +1279,7 @@ function bounded(promise,ms) {
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,clock=Date.now,
   io=fs,chromiumLoader=()=>loadChromium(pluginFolder),browserFinder=findBrowser,
-  loginLauncher=startLoginBrowser,env=process.env}={}) {
+  loginLauncher=startLoginBrowser,defaultBrowser=defaultWindowsBrowser,env=process.env}={}) {
   const manual=new Map(),busy=new Map(),contexts=new Set();
   let stopped=false,timer=null,tickBusy=false;
   const folder=account=>path.join(directory,crypto.createHash('sha256').update(account.provider+':'+account.id).digest('hex'));
@@ -1346,16 +1388,18 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
     // sign-in, verification or any other non-billing page.
     return readPage(context,account,url);
   }
-  async function open(account){
+  async function open(account,explicit=null){
     const existing=manual.get(account.id);
     if(existing?.process.isRunning())return publish(account,'awaiting_confirmation');
     const old=await readBinding(account);
     try{
       // Check availability without launching an automated browser.
       try{if(!chromiumLoader()?.launchPersistentContext)throw Error();}catch{throw new Error('runtime_missing');}
-      let browser=await browserFinder(existing?.browser.channel??old?.channel??null,env);
-      if(!browser&&(existing||old))browser=await browserFinder(null,env);
-      if(!browser)throw new Error('browser_missing');
+      const selected=await selectBillingBrowser({
+        preferred:existing?.browser.channel??old?.channel??null,explicit,env,browserFinder,defaultBrowser
+      });
+      if(!selected.browser)return publish(account,selected.state);
+      const browser=selected.browser;
       await io.rm(bindingFile(account),{force:true}).catch(()=>{throw new Error('profile_error');});
       await publish(account,'connecting');
       const profilePath=profile(account,browser.channel);
@@ -1403,7 +1447,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   }
   async function refreshAccount(account){
     const initialState=stateFor(await store.cached(),account.id,account.provider);
-    if(['disconnect_error','login_required'].includes(initialState?.state))return;
+    if(['disconnect_error','login_required',...CHOICE_STATES].includes(initialState?.state))return;
     const binding=await readBinding(account);
     if(!binding){
       const state=stateFor(await store.cached(),account.id,account.provider);
@@ -1436,7 +1480,7 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
   async function action(id,verb,page=''){
     const reply=async(accepted,reason=null)=>({accepted,reason,snapshot:await store.cached()});
     if(stopped)return reply(false,'service_unavailable');
-    if(!['open','confirm','disconnect'].includes(verb))return reply(false,'invalid_action');
+    if(!ACTIONS.includes(verb))return reply(false,'invalid_action');
     let snapshot=await store.cached();
     // Retry the private host inventory once rather than silently ignoring a click.
     if(snapshot.inventoryWarning){
@@ -1450,7 +1494,8 @@ function createBillingSessions({directory,pluginFolder,store,intervalMinutes=5,c
       let executed=false;
       await run(account,async()=>{
         executed=true;
-        return verb==='open'?open(account):verb==='confirm'?confirm(account,page):disconnect(account);
+        return verb==='confirm'?confirm(account,page):verb==='disconnect'?disconnect(account):
+          open(account,verb==='open_edge'?'msedge':verb==='open_chrome'?'chrome':null);
       },true);
       return executed?reply(true):reply(false,'account_unavailable');
     }catch{return reply(false,'action_failed');}
@@ -1504,7 +1549,7 @@ function createBillingCommands(service,{log=()=>{}}={}) {
     if(stopped)return 'service_unavailable';
     if(typeof id!=='string'||!id||id.length>120||
       typeof ticket!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(ticket)||
-      !['open','confirm','disconnect'].includes(action)||
+      !ACTIONS.includes(action)||
       typeof page!=='string'||page.length>512||(action!=='confirm'&&page!=='')||
       (action==='confirm'&&!billingPage('codex',page)&&!billingPage('opencode',page)))return 'invalid_action';
     const running=active.get(id);
@@ -1532,7 +1577,7 @@ function createBillingCommands(service,{log=()=>{}}={}) {
   function stop(){stopped=true;results.clear();}
   return {submit,status,stop};
 }
-module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,findBrowser,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};
+module.exports={billingPage,eligible,readBillingAmount,browserEnvironment,browserFromProgId,defaultWindowsBrowser,findBrowser,selectBillingBrowser,startLoginBrowser,createBillingSessions,createBillingCommands,STATES};
 
 })(__billing,__billing.exports);
 const __presentation={exports:{}}; (function(module,exports){
@@ -2058,6 +2103,9 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   const status=session?.state;
   const text={
     connecting:tr('Opening isolated browser…','Открывается отдельный браузер…'),
+    choose_edge:tr('The default or saved browser is unavailable or unsupported. Use Edge?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Edge?'),
+    choose_chrome:tr('The default or saved browser is unavailable or unsupported. Use Chrome?','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Использовать Chrome?'),
+    choose_browser:tr('The default or saved browser is unavailable or unsupported. Choose a browser for Billing.','Браузер по умолчанию или сохранённый браузер недоступен либо не поддерживается. Выбери браузер для Billing.'),
     awaiting_confirmation:tr('Sign in in the normal browser, open the matching Billing page, copy its address and close the login window.','Войди в обычном браузере, открой нужную страницу Billing, скопируй адрес и закрой окно входа.'),
     confirmation_unavailable:tr('Balance not recognized. Check the copied Billing address and retry.','Баланс не распознан. Проверь адрес Billing и повтори.'),
     close_login_browser:tr('Close all windows of this separate login profile, then confirm.','Закрой все окна отдельного профиля входа, затем подтверди.'),
@@ -2092,6 +2140,7 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
   };
   const line=add(card,$('div','display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:3px;margin-top:3px;min-height:0'));
   line.setAttribute('data-pv-billing-session',status||'disconnected');
+  const choosing=['choose_edge','choose_chrome','choose_browser'].includes(status);
   const waiting=['awaiting_confirmation','confirmation_unavailable','close_login_browser','profile_busy'].includes(status);
   const busy=pending||status==='connecting';
   const feedback=errors[actionError]||(pending?tr('Connecting…','Подключение…'):text);
@@ -2118,7 +2167,11 @@ function renderBillingControls(ctx,card,account,session,onBilling,pending){
     el.setAttribute('data-pv-billing-action',verb);
     el.addEventListener('click',event=>{event.stopPropagation();onBilling?.(account.id,verb,verb==='confirm'?(pageInput?.value||''):'');});
   };
-  if(waiting){
+  if(choosing){
+    if(status!=='choose_chrome')button('open_edge',tr('Use Edge','Использовать Edge'),tr('Open a dedicated Microsoft Edge profile.','Открыть отдельный профиль Microsoft Edge.'));
+    if(status!=='choose_edge')button('open_chrome',tr('Use Chrome','Использовать Chrome'),tr('Open a dedicated Google Chrome profile.','Открыть отдельный профиль Google Chrome.'));
+    button('open',tr('Retry default','Повторить выбор'),tr('Check the default or saved browser again.','Повторно проверить браузер по умолчанию или сохранённый браузер.'));
+  }else if(waiting){
     button('confirm',tr('Confirm account','Подтвердить аккаунт'),tr('Confirm only after closing the login browser and checking that the copied Billing page matches this API key.','Подтверди только после закрытия окна входа и проверки соответствия адреса Billing этому API-ключу.'));
     button('open',tr('Open browser','Открыть браузер'),tr('Reopen the normal login browser if needed.','Повторно открыть обычный браузер для входа.'));
   }else{

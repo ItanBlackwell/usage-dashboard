@@ -8,7 +8,8 @@ Public-release preparation for Usage Dashboard. This release is **not published*
 - Compact sidebar rings, live account overview, quota refresh, and latest-wins
   switching between saved accounts.
 - Persistent cache and optional per-account Billing Sessions for OpenAI API
-  and OpenCode Zen using Edge or Chrome, without a browser extension.
+  and OpenCode Zen using the supported Windows default browser (Edge or Chrome),
+  or an explicitly chosen installed alternative, without a browser extension.
   The previous browser companion and its local HTTP receiver are removed.
 
 ## Installation (Windows)

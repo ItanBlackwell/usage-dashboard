@@ -117,6 +117,7 @@ jobs:
             const page={url:()=>url,route:async()=>{},goto:async()=>{},evaluate:async()=>0};
             const context={pages:()=>[page],once:()=>{},close:async()=>{closed++;}};
             const service=createBillingSessions({directory:dir,store,
+              defaultBrowser:async()=> 'msedge',
               browserFinder:async()=>({channel:'msedge',executablePath:'edge.exe'}),
               loginLauncher:async({url:target,profilePath})=>{
                 manualLaunches++;assert.equal(target,url);assert.ok(profilePath.startsWith(dir));
@@ -149,6 +150,58 @@ jobs:
                 }});
               assert.equal(native.isRunning(),true);
             }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
+      - name: Verify system-default Billing browser selection
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const {browserFromProgId,defaultWindowsBrowser,selectBillingBrowser,createBillingSessions}=require('./src/billing-session.cjs');
+          (async()=>{
+            assert.equal(browserFromProgId('ChromeHTML'),'chrome');
+            assert.equal(browserFromProgId('MSEdgeHTM'),'msedge');
+            assert.equal(browserFromProgId('FirefoxURL-123'),null);
+            assert.equal(browserFromProgId('BraveHTML'),null);
+            const defaultBrowser=async()=> 'chrome';
+            const env={SystemRoot:'C:\\Windows',OPENAI_API_KEY:'not-for-child'};
+            const channel=await defaultWindowsBrowser(env,'win32',(exe,args,opts,done)=>{
+              assert.equal(exe,'C:\\Windows\\System32\\reg.exe');
+              assert.ok(args[1].includes('\\https\\UserChoice'));
+              assert.equal(opts.shell,false);
+              assert.equal(opts.env.OPENAI_API_KEY,undefined);
+              done(null,'    ProgId    REG_SZ    ChromeHTML\r\n');
+            });
+            assert.equal(channel,'chrome');
+            assert.equal(await defaultWindowsBrowser(env,'linux',()=>{throw Error('unexpected');}),null);
+            const available=new Set(['msedge','chrome']);
+            const browserFinder=async channel=>available.has(channel)?{channel,executablePath:channel+'.exe'}:null;
+            const select=(opts={})=>selectBillingBrowser({defaultBrowser,browserFinder,env,...opts});
+            assert.equal((await select()).browser.channel,'chrome');
+            assert.equal((await select({preferred:'msedge'})).browser.channel,'msedge');
+            assert.equal((await select({explicit:'msedge'})).browser.channel,'msedge');
+            assert.equal((await select({defaultBrowser:async()=>null})).state,'choose_browser');
+            available.delete('chrome');
+            assert.equal((await select()).state,'choose_edge');
+            assert.equal((await select({explicit:'msedge'})).browser.channel,'msedge');
+            available.clear();
+            assert.equal((await select()).state,'browser_missing');
+            const account={id:'openai:fixture',provider:'codex',kind:'api',message:'api_key_connected'};
+            let snapshot={accounts:[account],billingSessions:[],inventoryWarning:null},launches=0;
+            available.add('msedge');
+            const service=createBillingSessions({
+              directory:'fixture',env,defaultBrowser,browserFinder,
+              store:{cached:async()=>snapshot,setBillingSession:async(id,p,s)=>{snapshot={...snapshot,billingSessions:[s]};return snapshot;}},
+              io:{readFile:async()=>{throw Error('missing');},rm:async()=>{},mkdir:async()=>{}},
+              chromiumLoader:()=>({launchPersistentContext:()=>{throw Error('must not automate login');}}),
+              loginLauncher:async({browser})=>{assert.equal(browser.channel,'msedge');launches++;return {isRunning:()=>false};}
+            });
+            try{
+              assert.equal((await service.action(account.id,'open')).snapshot.billingSessions[0].state,'choose_edge');
+              assert.equal(launches,0);
+              assert.equal((await service.action(account.id,'open_edge')).snapshot.billingSessions[0].state,'awaiting_confirmation');
+              assert.equal(launches,1);
+            }finally{await service.stop();}
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
       - name: Verify independent Billing command transport
