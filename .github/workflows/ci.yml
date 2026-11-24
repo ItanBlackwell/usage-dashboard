@@ -399,7 +399,9 @@ jobs:
             const visible=n=>[n,...(n.tag==='details'&&!n.open?n.childNodes.filter(x=>x.tag==='summary'):n.childNodes).flatMap(visible)];
             const remoteDetails=all(remote).find(n=>n.tag==='details');
             assert.equal(remoteDetails.open,false);
-            assert.ok(visible(remote).some(n=>n.textContent==='Баланс недоступен'));
+            assert.ok(!visible(remote).some(n=>n.textContent==='Баланс недоступен'||n.textContent==='Balance unavailable'));
+            assert.equal(p.formatCurrency(null,'USD'),'—');
+            assert.equal(p.formatCurrency(0,'USD'),'$0.00');
             assert.ok(!visible(remote).some(n=>n.textContent==='$0.005'||n.textContent==='Расход ключа · всего'));
             assert.ok(all(remoteDetails).some(n=>n.textContent==='$0.005'));
             remoteDetails.open=true;

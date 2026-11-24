@@ -2359,11 +2359,7 @@ function renderProviderDetails(ctx,card,account,consoleRenderer=null){
   const box=$('div','display:flex;flex-direction:column;gap:2px;padding-top:3px;min-width:0');
   // A wallet is the primary monetary metric. Only known limits can replace
   // it in the compact view; detailed spending and diagnostics stay collapsed.
-  const budget=presentation.openRouterBudget(account)||presentation.tightestGeneralBudget(account);
   const validConsoleBudgets=(account.budgets||[]).filter(b=>Number.isFinite(b.remainingUsd)&&b.resetsAt>Date.now());
-  if(account.kind==='api'&&!hasBalance&&!budget&&!validConsoleBudgets.length){
-    add(list,$('span',style,tr('Balance unavailable','Баланс недоступен')));
-  }
   if(account.kind==='api'&&account.state==='stale')add(list,$('span',style,tr('Last known reading','Последние известные данные')));
   const row=(parent,label,value,tip='')=>{
     const r=add(parent,$('div','display:flex;align-items:baseline;justify-content:space-between;gap:5px;min-width:0;'+style));

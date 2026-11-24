@@ -4,7 +4,8 @@
 
 - Prioritize wallet balances and remaining quota bars in the compact view.
   Keep spending, usage counters, budget details and diagnostics in collapsed
-  disclosures; preserve sub-cent costs. Show separate provider-level local
+  disclosures; preserve sub-cent costs. Use a dash without a redundant
+  unavailable-balance caption. Show separate provider-level local
   OpenCode estimates in a collapsed section for today and the current UTC month when a balance,
   budget or quota is unavailable. Never attribute local statistics to individual
   credentials or treat model cost as a confirmed debit. Use the host statistics

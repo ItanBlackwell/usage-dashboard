@@ -83,7 +83,8 @@ Usage Dashboard reuses existing provider connections. Wallet balances, key
 spending caps, organization analytics and subscription quotas remain distinct.
 The compact view prioritizes wallet balances and remaining quota bars.
 When no wallet is available, a verified spending cap is shown separately as
-a budget; unavailable balances or quotas are identified without assuming zero.
+a budget; unavailable balances use a dash rather than zero, and unavailable
+quotas are identified separately.
 Expand **Statistics & details** to inspect spending, tokens, model counters,
 additional budget policies and detailed availability reasons.
 When a wallet, general spending cap or subscription quota cannot be read, a

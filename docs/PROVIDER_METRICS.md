@@ -86,8 +86,9 @@ is explicitly distinguished from the wallet. Free-model quotas remain visible.
 **Statistics & details** is collapsed by default and contains spending by
 period, organization usage, tokens, requests, additional policies, model
 counters and detailed availability reasons. Small positive expenses retain
-sub-cent precision. Unavailable primary metrics and stale API readings are
-identified in the compact view. Expanded sections retain their state during
+sub-cent precision. An unavailable wallet is represented by a dash with
+its explanation in the tooltip or details, rather than a separate caption.
+Unavailable quotas and stale API readings remain identified. Expanded sections retain their state during
 refreshes within the current Desktop window.
 
 When an API wallet or general spending cap, or a subscription quota, is
