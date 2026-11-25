@@ -10,11 +10,15 @@ try {
     $root=Get-OpenCodeRoot
     $plugin=Join-Path $root 'plugins\usage-dashboard'
     $saved=Join-Path $root '.usage-dashboard-userdata'
+    Assert-NoReparsePath -Path $plugin
+    Assert-NoReparsePath -Path $saved
     if (Confirm-PluginIdentity -Directory $plugin -Expected 'usage-dashboard') {
+        Assert-NoReparseTree -Path $plugin
         New-Item -ItemType Directory -Force -Path $saved | Out-Null
         foreach($name in @('settings.json')) {
             $src=Join-Path $plugin $name
             if (Test-Path -LiteralPath $src -PathType Leaf) {
+                Assert-NoReparsePath -Path (Join-Path $saved $name)
                 Copy-Item -LiteralPath $src -Destination (Join-Path $saved $name) -Force
             }
         }
@@ -26,6 +30,8 @@ try {
     if ($PurgeCachedData) {
         $cacheBase=if($env:LOCALAPPDATA){$env:LOCALAPPDATA}else{Join-Path $HOME '.cache'}
         $cache=Join-Path $cacheBase 'usage-dashboard'
+        Assert-NoReparseTree -Path $cache
+        Assert-NoReparseTree -Path $saved
         if (Test-Path -LiteralPath $cache) { Remove-Item -LiteralPath $cache -Recurse -Force }
         $saved=Join-Path $root '.usage-dashboard-userdata'
         if (Test-Path -LiteralPath $saved) { Remove-Item -LiteralPath $saved -Recurse -Force }

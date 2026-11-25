@@ -625,6 +625,11 @@ jobs:
         shell: bash
         run: |
           python3 tools/make-distributions.py
+          (cd release && sha256sum *.zip) > "$RUNNER_TEMP/first-build.sha256"
+          touch private-untracked-fixture.txt
+          python3 tools/make-distributions.py
+          rm private-untracked-fixture.txt
+          (cd release && sha256sum -c "$RUNNER_TEMP/first-build.sha256")
           python3 - <<'PYCODE'
           from pathlib import Path
           import json, zipfile

@@ -49,3 +49,16 @@ and the potential impact. Redact all secrets and private account data.
 Never commit `.env`, `settings.json`, local cache, access tokens, isolated
 billing profiles, local bindings, or authenticated HTTP responses. Rotate any
 credential accidentally disclosed.
+
+## Release integrity
+
+Release tags must match the package version and point to a commit in main.
+Full CI, archive checksums and build provenance are required before publication.
+Source distributions contain tracked files (or the distributed source manifest)
+with additional exclusions and normalized ZIP metadata. Build from a clean,
+trusted checkout. The manifest is not a signature; verify published checksums
+and GitHub artifact attestations before using an archive.
+
+Repository maintainers should enable branch and tag rulesets, private vulnerability
+reporting, secret scanning and push protection in GitHub settings. Never bypass
+failed security or installation checks to publish a release.
