@@ -102,6 +102,7 @@ jobs:
 
   publish:
     needs: package
+    environment: release
     runs-on: ubuntu-latest
     permissions:
       contents: write
