@@ -5,9 +5,15 @@ name: CI
 
 on:
   push:
-    branches: [main, feat/top-tabs-indicator]
+    branches: [main]
   pull_request:
     branches: [main]
+
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -15,9 +21,12 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
       - name: Static syntax and build checks
@@ -25,7 +34,9 @@ jobs:
         run: |
           set -euo pipefail
           for file in src/*.cjs build.cjs; do node --check "$file"; done
+          cp dist/gui-experimental.cjs "$RUNNER_TEMP/committed-bundle.cjs"
           node build.cjs
+          diff -u <(sed '/^ \* Source-Revision:/d' "$RUNNER_TEMP/committed-bundle.cjs") <(sed '/^ \* Source-Revision:/d' dist/gui-experimental.cjs)
           node --check dist/gui-experimental.cjs
           node -e 'const p=require("./package.json");if(p.name!=="usage-dashboard"||!p.exports?.["./gui-experimental"])process.exit(1)'
       - name: Verify balance presentation and IPC fallback
@@ -635,16 +646,20 @@ jobs:
                       assert 'Usage-Dashboard/docs/OPENCODE_BUDGETS.md' in names
                       assert 'Usage-Dashboard/docs/PROVIDER_METRICS.md' in names
           PYCODE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Usage-Dashboard-test-build
           path: release/*.zip
           if-no-files-found: error
+          retention-days: 14
 
   windows-installer-smoke:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Parse Windows PowerShell scripts
         shell: pwsh
         run: |
