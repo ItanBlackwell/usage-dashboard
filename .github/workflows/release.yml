@@ -118,7 +118,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=$(jq -er '.version | select(test("^[0-9]+\\\\.[0-9]+\\\\.[0-9]+$"))' package.json)
+          VERSION=$(jq -er '.version | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))' package.json)
           TAG="v${VERSION}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG is already published. No changes were made."
