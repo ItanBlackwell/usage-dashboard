@@ -96,7 +96,10 @@ unavailable, the collapsed **Usage estimate** section shows today's and the curr
 recorded model cost, tokens and steps by provider (UTC). It uses the host's
 [experimental session statistics API](https://opencode.ai/docs/api)
 (`experimental.session.stats`, `tools: none`) with two bounded read-only
-requests per refresh. Only known provider IDs are recognized; custom aliases
+requests per refresh. The seven-day chart reuses today's result and queries
+the preceding six UTC days from the same local host API, in batches of at
+most three requests. Completed-day data is refreshed hourly (or retried
+after five minutes if incomplete). Only known provider IDs are recognized; custom aliases
 are not inferred from model names. Local statistics may include subscription
 usage or imported history and do not include usage outside this server. They
 are not provider charges and cannot identify historical credentials. Totals are
@@ -117,10 +120,22 @@ Unobserved consumption before a reset, skipped windows and changes spanning
 a reporting boundary are not reconstructed. Estimates can exceed 100 points
 across multiple resets, include activity outside OpenCode and cannot be
 attributed to individual sessions or models. Missing comparisons show a
-dash; the tooltip indicates the last included observation. Only two period
-aggregates and one baseline per window and connection are retained in the
-existing snapshot cache, without new provider requests, tokens or payloads.
-Removed connections are pruned; older caches start without estimates.
+dash; the tooltip indicates the last included observation. Up to seven daily
+aggregates, the current month aggregate and one baseline per window and
+connection are retained in the existing snapshot cache. The current-day
+aggregate is reused in the chart. Removed connections are pruned; older
+caches migrate their existing current-day aggregate but cannot reconstruct
+missing historical Codex usage.
+
+The chart uses a shared seven-day UTC calendar, but never combines currency
+and quota metrics or quotas from different accounts. Its selector only
+changes the displayed series. Local model cost is shown in USD across all
+accounts of the selected provider, including any subscription usage reported
+by the host. Days without a comparable observation or provider row are gaps,
+not zero. The current day is incomplete, and weekly totals describe observed
+values only. The additional cache is limited to daily sanitized provider
+aggregates and timestamps, without chat content, tokens of authentication or
+provider payloads. No new provider requests are made.
 
 Authentication failures, permission errors, missing data, experimental
 contracts and unsupported APIs are separate states. The sidebar continues to

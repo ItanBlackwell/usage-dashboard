@@ -17,6 +17,7 @@ const presentation = require('./presentation.cjs');
 const cache = require('./cache.cjs');
 const switchQueue = require('./switch-queue.cjs');
 const nativeUpdate = require('./native-update-layout.cjs');
+const weeklyChart = require('./weekly-chart.cjs');
 
 const ProviderBalanceSchema = Schema.Struct({amount:Schema.Number,currency:Schema.String,kind:Schema.String});
 const WindowSchema = Schema.Struct({ label:Schema.String, usedPercent:Schema.Number,
@@ -42,13 +43,14 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
 const LocalUsageRowSchema=Schema.Struct({provider:Schema.String,cost:Schema.NullOr(Schema.Number),tokens:Schema.NullOr(Schema.Number),steps:Schema.NullOr(Schema.Number)});
 const LocalUsagePeriodSchema=Schema.Struct({from:Schema.Number,to:Schema.Number,rows:Schema.Array(LocalUsageRowSchema)});
 const LocalUsageSchema=Schema.Struct({today:Schema.NullOr(LocalUsagePeriodSchema),month:Schema.NullOr(LocalUsagePeriodSchema)});
+const LocalWeekSchema=Schema.Struct({checkedAt:Schema.Number,days:Schema.Array(LocalUsagePeriodSchema)});
 const CodexUsagePeriodSchema=Schema.Struct({from:Schema.Number,to:Schema.Number,amount:Schema.Number});
 const CodexUsageBaselineSchema=Schema.Struct({at:Schema.Number,resetsAt:Schema.Number,peak:Schema.Number});
-const CodexUsageWindowSchema=Schema.Struct({baseline:Schema.NullOr(CodexUsageBaselineSchema),today:Schema.NullOr(CodexUsagePeriodSchema),month:Schema.NullOr(CodexUsagePeriodSchema)});
+const CodexUsageWindowSchema=Schema.Struct({baseline:Schema.NullOr(CodexUsageBaselineSchema),today:Schema.NullOr(CodexUsagePeriodSchema),month:Schema.NullOr(CodexUsagePeriodSchema),daily:Schema.Array(CodexUsagePeriodSchema)});
 const CodexUsageAccountSchema=Schema.Struct({id:Schema.String,fiveHour:CodexUsageWindowSchema,weekly:CodexUsageWindowSchema});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  localUsage:LocalUsageSchema,codexUsage:Schema.Array(CodexUsageAccountSchema),inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v8',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+  localUsage:LocalUsageSchema,localWeek:LocalWeekSchema,codexUsage:Schema.Array(CodexUsageAccountSchema),inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v9',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -68,6 +70,7 @@ const snapshotListeners = new Set();
 // Per-desktop-window first-seen order survives closing and reopening the popup.
 const stableAccountOrder = new Map();
 const expandedAccountDetails=new Set();
+const weeklyChartState={key:null,day:null};
 // Only an unconfirmed request may override active flags received from main.
 const visualIntents = new Map();
 let latestSelectedID=null;
@@ -163,7 +166,7 @@ const providerLabel = provider => PROVIDER_NAMES[provider]||provider;
 function compactCard(parent,active=false){
   const color=active?'rgba(69,191,141,.13)':palette.border;
   const bg=active?'rgba(69,191,141,.045)':'rgba(125,135,155,.035)';
-  const card=add(parent,$('div',`box-sizing:border-box;min-width:0;padding:6px 7px;border:1px solid ${color};border-radius:8px;background:${bg}`));
+  const card=add(parent,$('div',`box-sizing:border-box;min-width:0;padding:7px 8px;border:1px solid ${color};border-radius:8px;background:${bg}`));
   card.setAttribute('data-pv-account-card','true');
   return card;
 }
@@ -428,7 +431,8 @@ function renderConsoleBudgets(ctx,card,account,statisticsParent=card){
 function renderLocalUsage(ctx,parent,data,accounts){
   const now=Date.now(),providers=[...new Set(accounts.filter(a=>presentation.needsLocalUsage(a,now)).map(a=>a.provider))];
   const codexAccounts=accounts.filter(a=>a.provider==='codex'&&a.kind==='subscription'&&a.source==='OpenCode');
-  if(!providers.length&&!codexAccounts.length)return;
+  const chartProviders=[...new Set([...providers,...accounts.filter(a=>a.kind==='api').map(a=>a.provider)])];
+  if(!chartProviders.length&&!codexAccounts.length)return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru'),tr=(en,rus)=>ru?rus:en;
   const wrapper=compactCard(parent);
   wrapper.setAttribute('data-pv-local-usage','true');
@@ -437,7 +441,9 @@ function renderLocalUsage(ctx,parent,data,accounts){
   details.open=expandedAccountDetails.has(expansionKey);
   add(details,$('summary','cursor:pointer;font-size:11px;color:'+palette.text,tr('Usage estimate','Оценка расхода')));
   details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(expansionKey);else expandedAccountDetails.delete(expansionKey);});
-  const card=add(details,$('div','min-width:0;padding-top:3px'));
+  const card=add(details,$('div','min-width:0;padding-top:5px'));
+  weeklyChart.render(card,data,codexAccounts,chartProviders,{document,palette,tr,providerLabel,formatSpend:presentation.formatSpend,
+    locale:ru?'ru-RU':'en-US',now,state:weeklyChartState});
   if(codexAccounts.length){
     const group=add(card,$('div','min-width:0;margin-bottom:4px'));
     group.setAttribute('data-pv-codex-usage','true');
@@ -520,7 +526,7 @@ function renderLimits(ctx,target,data,onSwitch=null,switchingID=null,stableOrder
     node.setAttribute('data-pv-empty-state',initial?'loading':unavailable?'unavailable':'none');
     return;
   }
-  const list=add(target,$('div','display:flex;flex-direction:column;gap:4px'));
+  const list=add(target,$('div','display:flex;flex-direction:column;gap:5px'));
   for(const account of accounts){
     const card=compactCard(list,account.active);
     accountHeader(ctx,card,account,onSwitch,switchingID);
@@ -653,13 +659,13 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
+    return {accounts,organizations:[],localUsage:{today:null,month:null},localWeek:{checkedAt:0,days:[]},codexUsage:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
 function createView(ctx,client,{compact=false}={}) {
-  const root=$('section',`box-sizing:border-box;min-width:0;${compact?'overflow:visible;':'overflow-y:auto;max-height:100%;'}padding:${compact?'8px 9px':'16px'};color:${palette.text};font-family:inherit;background:${compact?'var(--v2-background-bg-layer-02, var(--background,#18191d))':'transparent'}`);
-  const header=add(root,$('div','display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid ${palette.border}'));
-  const heading=add(header,$('strong',`font-size:12px;color:${palette.text}`,t(ctx,'usage.title')));
+  const root=$('section',`box-sizing:border-box;min-width:0;${compact?'overflow:visible;':'overflow-y:auto;max-height:100%;'}padding:${compact?'10px 11px':'16px'};color:${palette.text};font-family:inherit;background:${compact?'var(--v2-background-bg-layer-02, var(--background,#18191d))':'transparent'}`);
+  const header=add(root,$('div',`display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid ${palette.border}`));
+  const heading=add(header,$('strong',`font-size:13px;font-weight:600;color:${palette.text}`,t(ctx,'usage.title')));
   const refresh=add(header,$('button',`background:transparent;color:${palette.muted};border:0;cursor:pointer;font-size:16px;padding:2px 4px;display:flex;align-items:center;justify-content:center;min-width:22px;min-height:22px`));
   add(refresh,$('span','display:inline-block;transform-origin:center;line-height:1','↻'));
   refresh.type='button';refresh.setAttribute('aria-label',t(ctx,'usage.retry'));refresh.title=t(ctx,'usage.retry');
@@ -685,9 +691,14 @@ function createView(ctx,client,{compact=false}={}) {
     }else{
       snapshot=presentation.mergeInventoryFallback(snapshot,lastServerSnapshot||latestVerifiedSnapshot);
     }
-    lastSnapshot=applyDesired(snapshot);
+    const applied=applyDesired(snapshot),chart=body.querySelector('[data-pv-weekly-chart]');
+    // Keep the native select and focused/hovered chart usable during identical
+    // five-second IPC polls; fresh data and account switches still render.
+    const interacting=chart&&(chart.matches(':hover')||chart.contains(document.activeElement));
+    const unchanged=interacting&&lastSnapshot&&JSON.stringify(lastSnapshot)===JSON.stringify(applied);
+    lastSnapshot=applied;
     hasData=!!(snapshot.accounts?.length||snapshot.organizations?.length||snapshot.checkedAt);
-    renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
+    if(!unchanged)renderLimits(ctx,body,lastSnapshot,activate,null,stableOrder);
   };
   // Queued requests are serialized per provider. While one is running,
   // subsequent clicks replace the *unstarted* request; no interim API call.
@@ -946,7 +957,7 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
     const vw=window.innerWidth||document.documentElement.clientWidth||1024;
     const vh=window.innerHeight||document.documentElement.clientHeight||768;
     const margin=12, gap=10;
-    const width=Math.max(0,Math.min(308,vw-2*margin));
+    const width=Math.max(0,Math.min(354,vw-2*margin));
     overlay.style.width=`${width}px`;
     const updateRight=getUpdaterBounds?.()?.right;
     let left=Math.max(rect.right,Number.isFinite(updateRight)?updateRight:rect.right)+gap;
@@ -957,7 +968,7 @@ function buildSidebarButton(ctx,client,{onResize,getUpdaterBounds}={}){
     const below=Math.max(0,vh-rect.top-margin);
     const openAbove=above>=below;
     const available=openAbove?above:below;
-    overlay.style.maxHeight=`${Math.floor(Math.min(520,vh*0.65,available))}px`;
+    overlay.style.maxHeight=`${Math.floor(Math.min(598,vh*0.7475,available))}px`;
     if(openAbove){
       overlay.style.top='auto';
       overlay.style.bottom=`${Math.max(0,vh-rect.bottom)}px`;

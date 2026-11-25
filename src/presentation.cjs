@@ -103,7 +103,7 @@ function mergeInventoryFallback(inventory,previous) {
       budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
       checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={accounts,organizations:inventory?.organizations||[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
+  const merged={accounts,organizations:inventory?.organizations||[],localUsage:{today:null,month:null},localWeek:{checkedAt:0,days:[]},codexUsage:[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
   return merged;
 }
 function formatCurrency(amount,currency) {

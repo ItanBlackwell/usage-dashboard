@@ -11,7 +11,7 @@ const path = require('node:path');
 const root = __dirname;
 const oldCore = fs.readFileSync(path.join(root,'src/core.cjs'),'utf8');
 const accounts = fs.readFileSync(path.join(root,'src/accounts.cjs'),'utf8');
-const providerModules=['provider-metrics','provider-claude','provider-kimi','provider-zai','provider-minimax','local-usage','codex-usage'];
+const providerModules=['provider-metrics','provider-claude','provider-kimi','provider-zai','provider-minimax','local-usage','codex-usage','weekly-chart'];
 const moduleVar=name=>'__'+name.replaceAll('-','_');
 const inlineProviders=source=>providerModules.reduce((text,name)=>text.replaceAll("require('./"+name+".cjs')",moduleVar(name)+'.exports'),source);
 const providerBundle=providerModules.map(name=>{
@@ -46,7 +46,7 @@ const text = banner + `'use strict';\n` +
   `const __presentation={exports:{}}; (function(module,exports){\n${presentation}\n})(__presentation,__presentation.exports);\n` +
   `const __switchQueue={exports:{}}; (function(module,exports){\n${switchQueue}\n})(__switchQueue,__switchQueue.exports);\n` +
   `const __nativeUpdate={exports:{}}; (function(module,exports){\n${nativeUpdate}\n})(__nativeUpdate,__nativeUpdate.exports);\n` +
-  gui.replace("const core = require('./accounts.cjs');",'const core = __accounts.exports;')
+  inlineProviders(gui).replace("const core = require('./accounts.cjs');",'const core = __accounts.exports;')
      .replace("const presentation = require('./presentation.cjs');",'const presentation = __presentation.exports;')
      .replace("const cache = require('./cache.cjs');","const cache = __cache.exports;")
      .replace("const switchQueue = require('./switch-queue.cjs');","const switchQueue = __switchQueue.exports;")
