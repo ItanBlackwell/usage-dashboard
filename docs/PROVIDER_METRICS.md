@@ -92,7 +92,7 @@ Unavailable quotas and stale API readings remain identified. Expanded sections r
 refreshes within the current Desktop window.
 
 When an API wallet or general spending cap, or a subscription quota, is
-unavailable, a separate collapsed local usage section shows today's and the current month's
+unavailable, the collapsed **Usage estimate** section shows today's and the current month's
 recorded model cost, tokens and steps by provider (UTC). It uses the host's
 [experimental session statistics API](https://opencode.ai/docs/api)
 (`experimental.session.stats`, `tools: none`) with two bounded read-only
@@ -103,7 +103,25 @@ are not provider charges and cannot identify historical credentials. Totals are
 shown once per provider, never apportioned across accounts. Missing model rows
 or failed reads remain unavailable; previous UTC periods are not shown as
 current. Only aggregate numbers and period timestamps are cached, not chat
-content, model identifiers, session identifiers or a second usage ledger.
+content, model identifiers or session identifiers.
+
+The same section includes separate Codex subscription estimates for every
+connected OpenAI account, including accounts whose current quotas are
+available. The main process compares successful readings from the existing
+quota refresh using the connection ID, quota window and reset timestamp.
+The first reading is a baseline, not a charge. Only positive changes (or
+observed zero changes) in comparable windows and observed use in a confirmed
+new window contribute to the current UTC day and month, in percentage
+points. A high-water mark avoids double counting downward corrections.
+Unobserved consumption before a reset, skipped windows and changes spanning
+a reporting boundary are not reconstructed. Estimates can exceed 100 points
+across multiple resets, include activity outside OpenCode and cannot be
+attributed to individual sessions or models. Missing comparisons show a
+dash; the tooltip indicates the last included observation. Only two period
+aggregates and one baseline per window and connection are retained in the
+existing snapshot cache, without new provider requests, tokens or payloads.
+Removed connections are pruned; older caches start without estimates.
+
 Authentication failures, permission errors, missing data, experimental
 contracts and unsupported APIs are separate states. The sidebar continues to
 prefer a real balance, or shows a separately marked key/general budget when

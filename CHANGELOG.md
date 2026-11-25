@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Rename the collapsed local usage section to **Usage estimate** and add
+  observed Codex quota consumption per connected OpenAI subscription, with
+  separate 5-hour and weekly totals for today and the current UTC month.
+  Preserve provider-level local cost statistics and reuse existing quota
+  refreshes. Persist only bounded aggregates and baselines; omit ambiguous
+  intervals and show unavailable observations as a dash.
+
 ## 0.14.0
 
 - Show the exact local quota reset time on hover.

@@ -103,7 +103,7 @@ function mergeInventoryFallback(inventory,previous) {
       budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
       checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={accounts,organizations:inventory?.organizations||[],localUsage:{today:null,month:null},inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
+  const merged={accounts,organizations:inventory?.organizations||[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
   return merged;
 }
 function formatCurrency(amount,currency) {
@@ -173,6 +173,12 @@ function localUsagePeriod(snapshot,period,now=Date.now()){
   const from=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),period==='today'?d.getUTCDate():1);
   return v&&v.from===from&&Number.isFinite(v.to)&&v.to>from&&v.to<=now&&Array.isArray(v.rows)?v:null;
 }
+function codexUsagePeriod(snapshot,id,kind,period,now=Date.now()){
+  if(!['fiveHour','weekly'].includes(kind)||!['today','month'].includes(period))return null;
+  const v=snapshot?.codexUsage?.find(a=>a.id===id)?.[kind]?.[period],d=new Date(now);
+  const from=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),period==='today'?d.getUTCDate():1);
+  return v&&v.from===from&&Number.isFinite(v.to)&&v.to>from&&v.to<=now&&Number.isFinite(v.amount)&&v.amount>=0?v:null;
+}
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,openRouterBudget,formatCurrency,formatSpend,needsLocalUsage,localUsagePeriod,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,openRouterBudget,formatCurrency,formatSpend,needsLocalUsage,localUsagePeriod,codexUsagePeriod,mergeInventoryFallback };
 

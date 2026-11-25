@@ -331,6 +331,79 @@ jobs:
             assert.ok(all(deniedRoot).some(n=>n.attrs['data-pv-metric-notice']==='forbidden'&&n.textContent.includes('403')));
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
+      - name: Verify account-level Codex quota consumption estimates
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs/promises');
+          const os=require('node:os');
+          const path=require('node:path');
+          const {advanceCodexUsage,cleanCodexUsage}=require('./src/codex-usage.cjs');
+          const {persistentMonitor,sanitizeSnapshot}=require('./src/cache.cjs');
+          const p=require('./src/presentation.cjs');
+          const t=Date.parse('2026-11-24T20:00:00Z'),h=3600000;
+          const account=(id,at,used,weekly=10,reset=t+3*h,extra={})=>({
+            id:'openai:'+id,provider:'codex',kind:'subscription',source:'OpenCode',label:'Fixture '+id,
+            state:'ok',message:'ok',checkedAt:at,windows:[
+              {label:'5-hour',usedPercent:used,remainingPercent:100-used,resetsAt:reset},
+              {label:'Weekly',usedPercent:weekly,remainingPercent:100-weekly,resetsAt:t+48*h}
+            ],...extra
+          });
+          let rows=[],now=t;
+          const tick=(accounts,at,warning=null)=>(now=at,rows=advanceCodexUsage(rows,accounts,warning,at));
+          const value=(id,kind,period)=>p.codexUsagePeriod({codexUsage:rows},'openai:'+id,kind,period,now)?.amount??null;
+          const a=account('a',t,40),b=account('b',t,20);
+          tick([a,b],t);
+          assert.equal(value('a','fiveHour','today'),null);
+          tick([account('a',t+h,60,14),account('b',t+h,20,10)],t+h);
+          assert.equal(value('a','fiveHour','today'),20);
+          assert.equal(value('a','weekly','month'),4);
+          assert.equal(value('b','fiveHour','today'),0);
+          tick([account('a',t+h,60,14),account('b',t+h,20,10)],t+h+1000);
+          assert.equal(value('a','fiveHour','today'),20);
+          tick([account('a',t+2*h,55,13),account('b',t+2*h,99,10,t+3*h,{state:'stale'})],t+2*h);
+          assert.equal(value('a','fiveHour','today'),20);
+          assert.equal(value('b','fiveHour','today'),0);
+          tick([account('a',t+2.5*h,70,16),account('b',t+2.5*h,25,10)],t+2.5*h);
+          assert.equal(value('a','fiveHour','today'),30);
+          assert.equal(value('b','fiveHour','today'),5);
+          tick([account('a',t+3.5*h,80,17,t+8*h),account('b',t+3.5*h,3,11,t+8*h)],t+3.5*h);
+          assert.equal(value('a','fiveHour','month'),110);
+          assert.equal(value('a','weekly','month'),7);
+          assert.equal(value('b','fiveHour','month'),8);
+          tick([account('a',t+4.5*h,90,18,t+8*h)],t+4.5*h);
+          assert.equal(value('a','fiveHour','today'),null);
+          assert.equal(value('a','fiveHour','month'),120);
+          assert.equal(rows.length,1);
+          tick([account('a',t+5*h,95,19,t+8*h)],t+5*h);
+          assert.equal(value('a','fiveHour','today'),5);
+          tick([account('a',t+5.5*h,99,20,t+8*h)],t+5.5*h,'last_known_values');
+          assert.equal(value('a','fiveHour','today'),5);
+          assert.deepEqual(cleanCodexUsage([{...rows[0],secret:'not-persisted'}],[a]),rows);
+          assert.deepEqual(cleanCodexUsage(rows,[b]),[]);
+          assert.deepEqual(sanitizeSnapshot({accounts:[a],codexUsage:rows}).codexUsage,rows);
+          assert.deepEqual(sanitizeSnapshot({accounts:[a]}).codexUsage,[]);
+          const month=Date.parse('2026-12-01T00:00:00Z');
+          tick([account('a',month+1,8,1,month+4*h)],month+1);
+          assert.equal(value('a','fiveHour','month'),null);
+          (async()=>{
+            const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ud-codex-usage-'));
+            let current=t,next={accounts:[a,b],checkedAt:t};
+            const make=()=>persistentMonitor({get:async()=>next},{directory:dir,clock:()=>current});
+            let store=make();
+            try{
+              await store.refresh(true);store.stop();store=make();
+              current=t+h;next={accounts:[account('a',current,50),account('b',current,22)],checkedAt:current};
+              const saved=await store.refresh(true);
+              assert.equal(p.codexUsagePeriod(saved,'openai:a','fiveHour','today',current).amount,10);
+              assert.equal(p.codexUsagePeriod(saved,'openai:b','fiveHour','today',current).amount,2);
+              assert.equal((await store.refresh(true)).codexUsage[0].fiveHour.today.amount,10);
+              const disk=JSON.parse(await fs.readFile(path.join(dir,'snapshot.json'),'utf8'));
+              assert.deepEqual(disk.codexUsage,saved.codexUsage);
+            }finally{store.stop();await fs.rm(dir,{recursive:true,force:true});}
+          })().catch(e=>{console.error(e);process.exitCode=1;});
+          NODE
       - name: Verify local usage estimates and compact spending display
         shell: bash
         run: |
@@ -386,6 +459,15 @@ jobs:
             const root=el('div','');local(ctx,root,{localUsage:usage},[{kind:'api',provider:'codex'},{kind:'api',provider:'codex'},{kind:'api',provider:'gemini'},{kind:'api',provider:'qwen'}]);
             const localDetails=all(root).find(n=>n.tag==='details');
             assert.equal(localDetails.open,false);
+            assert.ok(all(localDetails).some(n=>n.tag==='summary'&&n.textContent==='Оценка расхода'));
+            const quota={kind:'subscription',provider:'codex',source:'OpenCode',id:'openai:a',label:'Fixture A',windows:[{remainingPercent:60,resetsAt:now+3600000}]};
+            const quotaRoot=el('div','');local(ctx,quotaRoot,{codexUsage:[{id:quota.id,fiveHour:{today:{from:u.periodStart('today',now),to:now,amount:12}}}]},[quota,{...quota,id:'openai:b',label:'Fixture B'}]);
+            assert.equal(all(quotaRoot).filter(n=>n.tag==='details').length,1);
+            assert.equal(all(quotaRoot).find(n=>n.tag==='details').open,false);
+            assert.ok(all(quotaRoot).some(n=>n.textContent==='Fixture A'));
+            assert.ok(all(quotaRoot).some(n=>n.textContent==='Fixture B'));
+            assert.ok(all(quotaRoot).some(n=>n.textContent==='≈ 12 п.п.'));
+            assert.equal(all(quotaRoot).filter(n=>n.textContent==='—').length,7);
             assert.equal(all(localDetails).filter(n=>n.textContent==='codex').length,1);
             assert.ok(all(root).some(n=>n.textContent==='≈ $0.005'));
             assert.ok(all(root).some(n=>n.textContent==='≈ $0.00'));
