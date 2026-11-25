@@ -62,3 +62,8 @@ and GitHub artifact attestations before using an archive.
 Repository maintainers should enable branch and tag rulesets, private vulnerability
 reporting, secret scanning and push protection in GitHub settings. Never bypass
 failed security or installation checks to publish a release.
+
+For restricted GitHub Actions policies, allow the official GitHub Actions and
+explicitly allow `github/codeql-action` and `gitleaks/gitleaks-action`.
+Require full-length action commit SHAs and use the actual job check names
+reported by successful pull request runs in the branch ruleset.
