@@ -20,12 +20,15 @@ try {
     $plugins=Join-Path $root 'plugins'
     $target=Join-Path $plugins 'usage-dashboard'
     $old=Join-Path $plugins 'pv-usage-dashboard'
+    foreach ($path in @($root,$plugins,$target,$old,(Join-Path $target 'dist'),(Join-Path $target 'package.json'),(Join-Path $target 'dist\gui-experimental.cjs'),(Join-Path $target 'settings.json'),(Join-Path $root '.usage-dashboard-userdata'))) { Assert-NoReparsePath -Path $path }
     if ((Test-Path -LiteralPath $target) -and -not (Confirm-PluginIdentity -Directory $target -Expected 'usage-dashboard')) {
         throw 'Existing plugin directory has an unexpected identity.'
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $target 'dist') | Out-Null
     $copySafe = {
         param([string]$source,[string]$destination)
+        Assert-NoReparsePath -Path $source
+        Assert-NoReparsePath -Path $destination
         if ((Test-Path -LiteralPath $source -PathType Leaf) -and -not (Test-Path -LiteralPath $destination)) {
             Copy-Item -LiteralPath $source -Destination $destination -ErrorAction Stop
         }
@@ -51,6 +54,7 @@ try {
     $oldCache=Join-Path $cacheBase 'pv-usage-dashboard\snapshot.json'
     $newCacheDir=Join-Path $cacheBase 'usage-dashboard'
     $newCache=Join-Path $newCacheDir 'snapshot.json'
+    foreach ($path in @($oldCache,$newCacheDir,$newCache)) { Assert-NoReparsePath -Path $path }
     if ((Test-Path -LiteralPath $oldCache -PathType Leaf) -and -not (Test-Path -LiteralPath $newCache)) {
         New-Item -ItemType Directory -Force -Path $newCacheDir | Out-Null
         Copy-Item -LiteralPath $oldCache -Destination $newCache
@@ -59,6 +63,7 @@ try {
     # The backup is retained for rollback. No user accounts are changed.
     if (Confirm-PluginIdentity -Directory $old -Expected 'pv-usage-dashboard') {
         $backups=Join-Path $root '.usage-dashboard-legacy-backups'
+        Assert-NoReparsePath -Path $backups
         New-Item -ItemType Directory -Force -Path $backups | Out-Null
         $backup=Join-Path $backups "pv-usage-dashboard-$(Get-Date -Format yyyyMMddHHmmss)-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
         Move-Item -LiteralPath $old -Destination $backup

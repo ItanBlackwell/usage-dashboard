@@ -19,6 +19,7 @@ function Remove-DuplicatePluginReferences {
     foreach ($name in @('opencode.jsonc','opencode.json')) {
         $file = Join-Path $ConfigRoot $name
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        Assert-NoReparsePath -Path $file
         $raw = [System.IO.File]::ReadAllText($file)
         $match = [regex]::Match($raw, '(?s)"plugins"\s*:\s*\[(?<items>[^\[\]]*)\]')
         if (-not $match.Success) { continue }
@@ -45,6 +46,7 @@ function Remove-DuplicatePluginReferences {
         if ($removed -eq 0) { continue }
         $updated = $raw.Substring(0,$items.Index) + ($kept -join ', ') + $raw.Substring($items.Index+$items.Length)
         $backup = "$file.before-usage-dashboard.$(Get-Date -Format yyyyMMddHHmmss).bak"
+        Assert-NoReparsePath -Path $backup
         Copy-Item -LiteralPath $file -Destination $backup -ErrorAction Stop
         [System.IO.File]::WriteAllText($file, $updated, [System.Text.UTF8Encoding]::new($false))
         Write-Host "Removed $removed old/duplicate plugin reference(s) from $name. Backup: $backup"
@@ -142,5 +144,35 @@ function Remove-RetiredBillingRuntime {
         Write-Host 'Removed retired Billing runtime.'
     } catch {
         Write-Warning 'Could not completely remove the retired Billing runtime. Close OpenCode and retry installation.'
+    }
+}
+
+# Refuse redirected filesystem paths before modifying user or plugin data.
+function Assert-NoReparsePath {
+    param([Parameter(Mandatory)][string]$Path)
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $entry = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to modify a reparse point: $current"
+            }
+        }
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if (-not $parent -or $parent -eq $current) { break }
+        $current = $parent
+    }
+}
+function Assert-NoReparseTree {
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-NoReparsePath -Path $Path
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($Path)
+    while ($pending.Count -gt 0) {
+        foreach ($entry in Get-ChildItem -LiteralPath ($pending.Pop()) -Force -ErrorAction Stop) {
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing to remove a tree containing a reparse point: $($entry.FullName)" }
+            if ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
+        }
     }
 }
