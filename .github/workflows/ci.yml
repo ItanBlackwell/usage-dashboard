@@ -651,6 +651,8 @@ jobs:
                       assert 'Usage-Dashboard/docs/OPENCODE_BUDGETS.md' in names
                       assert 'Usage-Dashboard/docs/PROVIDER_METRICS.md' in names
           PYCODE
+      - name: Scan release archives for credential patterns
+        run: python3 tools/check-release-secrets.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Usage-Dashboard-test-build
