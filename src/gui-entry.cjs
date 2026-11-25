@@ -663,12 +663,27 @@ async function publicIntegrationFallback(ctx) {
     return {accounts,organizations:[],localUsage:{today:null,month:null},localWeek:{checkedAt:0,days:[]},codexUsage:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
-function renderPopupFooter(root){
+function renderPopupFooter(ctx,root){
   // Keep the footer outside the refreshed account body and use build metadata.
   const copyright=pluginMetadata.copyright.replace(/^Copyright \(c\) /i,'© ');
   const footer=add(root,$('footer',`margin-top:8px;padding-top:6px;border-top:1px solid ${palette.border};text-align:center;font-size:9px;line-height:1.4;color:${palette.muted};overflow-wrap:anywhere`,
-    'v'+pluginMetadata.version+' · '+copyright));
+    'v'+pluginMetadata.version+' · '+copyright+' · '));
   footer.setAttribute('data-pv-popup-footer','true');
+  const link=add(footer,$('a','color:inherit;text-decoration:underline;text-underline-offset:2px;cursor:pointer;white-space:nowrap','GitHub ↗'));
+  link.setAttribute('href',pluginMetadata.homepage);
+  link.setAttribute('target','_blank');
+  link.setAttribute('rel','noopener noreferrer');
+  link.setAttribute('data-pv-repository-link','true');
+  link.title=pluginMetadata.homepage;
+  // Prefer the host's system browser API. A normal HTTPS anchor remains
+  // usable on SDK versions that do not expose it.
+  link.addEventListener('click',event=>{
+    if(event.defaultPrevented||typeof ctx.system?.openExternal!=='function')return;
+    try{
+      ctx.system.openExternal(pluginMetadata.homepage);
+      event.preventDefault();
+    }catch{/* Let the safe native anchor handle the click. */}
+  });
   return footer;
 }
 function createView(ctx,client,{compact=false}={}) {
@@ -679,7 +694,7 @@ function createView(ctx,client,{compact=false}={}) {
   add(refresh,$('span','display:inline-block;transform-origin:center;line-height:1','↻'));
   refresh.type='button';refresh.setAttribute('aria-label',t(ctx,'usage.retry'));refresh.title=t(ctx,'usage.retry');
   const body=add(root,$('div'));
-  if(compact)renderPopupFooter(root);
+  if(compact)renderPopupFooter(ctx,root);
   let alive=true,running=false,hasData=false,lastSnapshot=null,lastServerSnapshot=null,queuedRefresh=false,coldRefreshRequested=false,switchSequence=0,commitVersion=0;
   const stableOrder=stableAccountOrder;
   const desiredByProvider=new Map();

@@ -413,21 +413,38 @@ jobs:
           const pkg=require('./package.json');
           const source=fs.readFileSync('src/gui-entry.cjs','utf8');
           const bundle=fs.readFileSync('dist/gui-experimental.cjs','utf8');
-          assert.ok(bundle.includes('const pluginMetadata = '+JSON.stringify({version:pkg.version,copyright:pkg.copyright})+';'));
+          assert.ok(bundle.includes('const pluginMetadata = '+JSON.stringify({version:pkg.version,copyright:pkg.copyright,homepage:pkg.homepage})+';'));
           assert.ok(!bundle.includes("require('../package.json')"));
           const render=new Function('$','add','palette','pluginMetadata',
             source.slice(source.indexOf('function renderPopupFooter('),source.indexOf('function createView('))+';return renderPopupFooter;');
-          const root={children:[]},node=(tag,style,text)=>({tag,style,text,attrs:{},setAttribute(k,v){this.attrs[k]=v;}});
+          const root={children:[]},node=(tag,style,text)=>({tag,style,text,children:[],attrs:{},listeners:{},setAttribute(k,v){this.attrs[k]=v;},addEventListener(k,fn){this.listeners[k]=fn;}});
           const append=(p,n)=>(p.children.push(n),n);
           const body=append(root,node('div','',''));
-          const footer=render(node,append,{border:'#444',muted:'#999'},pkg)(root);
+          const open=[],ctx={system:{openExternal:url=>open.push(url)}};
+          const footer=render(node,append,{border:'#444',muted:'#999'},pkg)(ctx,root);
           assert.equal(root.children.at(-1),footer);
           assert.equal(footer.tag,'footer');
-          assert.equal(footer.text,'v'+pkg.version+' · '+pkg.copyright.replace(/^Copyright \(c\) /i,'© '));
+          assert.equal(footer.text,'v'+pkg.version+' · '+pkg.copyright.replace(/^Copyright \(c\) /i,'© ')+' · ');
+          const link=footer.children[0];
+          assert.equal(link.tag,'a');
+          assert.equal(link.text,'GitHub ↗');
+          assert.equal(link.attrs.href,pkg.homepage);
+          assert.equal(link.attrs.target,'_blank');
+          assert.equal(link.attrs.rel,'noopener noreferrer');
+          assert.equal(link.attrs['data-pv-repository-link'],'true');
+          let prevented=false;
+          const event={defaultPrevented:false,preventDefault(){prevented=true;}};
+          link.listeners.click(event);
+          assert.deepEqual(open,[pkg.homepage]);assert.equal(prevented,true);
+          prevented=false;
+          const legacy=render(node,append,{border:'#444',muted:'#999'},pkg)({}, {children:[]});
+          legacy.children[0].listeners.click(event);assert.equal(prevented,false);
+          const failed=render(node,append,{border:'#444',muted:'#999'},pkg)({system:{openExternal(){throw Error('Unavailable');}}},{children:[]});
+          failed.children[0].listeners.click(event);assert.equal(prevented,false);
           assert.equal(footer.attrs['data-pv-popup-footer'],'true');
           assert.ok(footer.style.includes('font-size:9px'));
           body.children=[];assert.equal(root.children.at(-1),footer);
-          assert.ok(source.includes("const body=add(root,$('div'));\n  if(compact)renderPopupFooter(root);"));
+          assert.ok(source.includes("const body=add(root,$('div'));\n  if(compact)renderPopupFooter(ctx,root);"));
           NODE
       - name: Verify seven-day history and interactive line chart
         shell: bash

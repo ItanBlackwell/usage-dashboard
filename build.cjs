@@ -28,7 +28,9 @@ const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 const metadataImport = "const pluginMetadata = require('../package.json');";
 if (!gui.includes(metadataImport) || typeof pkg.version !== 'string' || !pkg.version || typeof pkg.copyright !== 'string' || !pkg.copyright)
   throw new Error('Missing plugin footer metadata');
-const metadata = JSON.stringify({version:pkg.version,copyright:pkg.copyright});
+if (typeof pkg.homepage !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(pkg.homepage))
+  throw new Error('Invalid GitHub repository homepage');
+const metadata = JSON.stringify({version:pkg.version,copyright:pkg.copyright,homepage:pkg.homepage});
 const sha = /^[0-9a-f]{40}$/i.test(process.env.GITHUB_SHA || '')
   ? process.env.GITHUB_SHA.toLowerCase() : 'local-build';
 const banner = [
