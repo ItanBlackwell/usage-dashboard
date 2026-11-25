@@ -9,43 +9,27 @@ on:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  windows-installer-smoke:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Parse PowerShell source
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Get-ChildItem installer -Filter *.ps1 | ForEach-Object {
-            $tokens = $null; $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count) { throw "Invalid PowerShell: $($_.Name): $($errors -join '; ')" }
-          }
-      - name: Install and uninstall in isolated directory (Windows PowerShell 5.1)
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $env:OPENCODE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'usage-dashboard-release-smoke'
-          & ./installer/Install-UsageDashboard.ps1 -PackageRoot (Get-Location).Path
-          $target = Join-Path $env:OPENCODE_CONFIG_DIR 'plugins/usage-dashboard'
-          if (-not (Test-Path (Join-Path $target 'dist/gui-experimental.cjs'))) { throw 'Bundle missing' }
-          if (Test-Path (Join-Path $target 'installer/BillingWindow.ps1')) { throw 'Retired helper installed' }
-          if (Test-Path (Join-Path $target 'node_modules/playwright-core')) { throw 'Retired runtime installed' }
-          if (Test-Path -LiteralPath (Join-Path $target 'browser-extension')) { throw 'Retired companion installed' }
-          & ./installer/Uninstall-UsageDashboard.ps1 -PurgeCachedData
-          if (Test-Path $target) { throw 'Uninstaller did not remove plugin' }
+  validate:
+    uses: ./.github/workflows/ci.yml
 
   package:
-    needs: [windows-installer-smoke]
+    needs: [validate]
+    if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
       - name: Verify tag matches package version
@@ -65,6 +49,32 @@ jobs:
           python3 tools/make-distributions.py
       - name: Checksums
         run: (cd release && sha256sum Usage-Dashboard-*.zip > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify release ancestry
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release
+      - name: Verify checksums
+        run: (cd release && sha256sum -c SHA256SUMS.txt)
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,6 +91,7 @@ jobs:
             "release/Usage-Dashboard-Portable-${VERSION}.zip" \
             "release/Usage-Dashboard-Source-${VERSION}.zip" \
             "release/SHA256SUMS.txt" \
+            --verify-tag \
             --target "$GITHUB_SHA" \
             --title "Usage Dashboard ${VERSION}" \
             --notes-file RELEASE_NOTES.md \
