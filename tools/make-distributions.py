@@ -40,8 +40,6 @@ with zipfile.ZipFile(portable, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         p = ROOT / relative
         if not p.resolve().is_relative_to(ROOT) or any(parent.is_symlink() for parent in p.parents if parent != ROOT and parent.is_relative_to(ROOT)):
             raise RuntimeError('Unsafe source path')
-        if name == manifest.name:
-            continue
         if not p.is_file(): raise RuntimeError(f'Missing portable file: {name}')
         add_file(z, p, f'Usage-Dashboard/{name}')
 
@@ -59,7 +57,14 @@ else:
 packaged = []
 with zipfile.ZipFile(source, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
     for name in sorted(set(filter(None, tracked))):
-        p = ROOT / name
+        relative = Path(name)
+        if relative.is_absolute() or '..' in relative.parts or not relative.parts:
+            raise RuntimeError('Invalid source path')
+        p = ROOT / relative
+        if not p.resolve().is_relative_to(ROOT) or any(parent.is_symlink() for parent in p.parents if parent != ROOT and parent.is_relative_to(ROOT)):
+            raise RuntimeError('Unsafe source path')
+        if name == manifest.name:
+            continue
         if not p.is_file() or p.is_symlink() or any(part in excludes or part.startswith('.billing-runtime-') for part in p.relative_to(ROOT).parts): continue
         if p.relative_to(ROOT).as_posix() in {'src/balance-bridge.cjs', 'docs/BROWSER_EXTENSION.md', 'src/billing-session.cjs', 'docs/BILLING_SESSION.md', 'billing-runtime.json', 'installer/BillingWindow.ps1'}: continue
         if p.name in {'pairing.json', 'settings.json', 'binding.json', 'snapshot.json', 'Test-UsageDashboard.ps1', 'test-results.txt'} or p.name.startswith('.env') or p.suffix in {'.tmp','.bak','.log'}: continue
