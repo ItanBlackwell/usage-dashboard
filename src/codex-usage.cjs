@@ -5,7 +5,7 @@
  * Source: https://github.com/ItanBlackwell/usage-dashboard
  */
 'use strict';
-const {periodStart}=require('./local-usage.cjs');
+const {periodStart,DAY_MS}=require('./local-usage.cjs');
 
 const windows={fiveHour:'5-hour',weekly:'Weekly'};
 const periods=['today','month'];
@@ -23,8 +23,19 @@ function cleanPeriod(p,period){
   return p&&time(p.from)&&time(p.to)&&p.to>p.from&&p.from===periodStart(period,p.to)&&amount(p.amount)
     ?{from:p.from,to:p.to,amount:p.amount}:null;
 }
+function cleanDays(days){
+  const byDay=new Map();
+  for(const value of days){
+    const day=cleanPeriod(value,'today');
+    if(day&&(!byDay.has(day.from)||byDay.get(day.from).to<=day.to))byDay.set(day.from,day);
+  }
+  return [...byDay.values()].sort((a,b)=>a.from-b.from).slice(-7);
+}
 function cleanWindow(w){
-  return {baseline:cleanBaseline(w?.baseline),today:cleanPeriod(w?.today,'today'),month:cleanPeriod(w?.month,'month')};
+  const today=cleanPeriod(w?.today,'today');
+  // Import the existing current-day aggregate when upgrading older snapshots.
+  const daily=cleanDays([...(Array.isArray(w?.daily)&&w.daily.length<=7?w.daily:[]),today]);
+  return {baseline:cleanBaseline(w?.baseline),today,month:cleanPeriod(w?.month,'month'),daily};
 }
 // Only existing connection IDs and bounded numeric aggregates are retained.
 function cleanCodexUsage(value,accounts){
@@ -46,7 +57,8 @@ function sample(account,label,now){
     ?{at:account.checkedAt,resetsAt:w.resetsAt,peak:w.usedPercent}:null;
 }
 function observe(previous,current,now){
-  const out=cleanWindow(previous);
+  const out=cleanWindow(previous),today=periodStart('today',now);
+  out.daily=out.daily.filter(d=>d.from>=today-6*DAY_MS&&d.from<=today&&d.to<=now);
   for(const period of periods){
     if(out[period]?.from!==periodStart(period,now)||out[period]?.to>now)out[period]=null;
   }
@@ -76,6 +88,7 @@ function observe(previous,current,now){
       if(amount(total))out[period]={from,to:current.at,amount:total};
     }
   }
+  out.daily=cleanDays([...out.daily,out.today]);
   return out;
 }
 function advanceCodexUsage(previous,accounts,inventoryWarning,now=Date.now()){

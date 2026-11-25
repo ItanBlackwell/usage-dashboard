@@ -96,6 +96,14 @@ When a wallet, general spending cap or subscription quota cannot be read,
 the same section also provides recorded local usage by provider across
 accounts. Local model cost is not a provider charge, balance or quota.
 
+An interactive line chart in **Usage estimate** covers the latest seven UTC
+days, including today. Select an OpenAI subscription to compare its observed
+5-hour and weekly quota consumption, or a provider to inspect recorded local
+model cost across accounts in USD. Missing readings leave gaps, confirmed
+zeros remain visible, and today's line segment is dashed. The selector
+does not activate credentials. Codex history grows from observed data;
+local cost history uses the host statistics API.
+
 Since version 0.14.0, browser-based billing and the companion extension are retired.
 Existing provider connections are used directly; no extra browser login is required.
 
@@ -105,6 +113,7 @@ supported and experimental contracts.
 ## Features
 
 - Lower-left icon with colored quota rings and a compact account popup across all three layouts.
+- Larger responsive popup (354 px wide, up to 598 px high), with a seven-day usage line chart.
 - Five-hour and weekly quota windows, plus monthly windows where supported.
 - Hover over a quota reset countdown to see its exact local reset time.
 - Serialized account switching: new selections replace pending unstarted

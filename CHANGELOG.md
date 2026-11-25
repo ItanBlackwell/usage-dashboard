@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add a small version and copyright footer at the bottom of the usage popup,
+  with a GitHub repository link, using package metadata embedded at build time.
+
+- Increase the popup width and maximum height by approximately 15% while
+  respecting viewport bounds; refine card spacing and the popup header.
+- Add an interactive seven-day UTC line chart to **Usage estimate**, with
+  independent account/provider selection, quota and local cost modes,
+  visible gaps, confirmed zeros, a dashed current-day segment and per-day
+  details. Retain at most seven days of Codex observations and refresh the
+  six completed local usage days through the existing host statistics API.
+
 - Rename the collapsed local usage section to **Usage estimate** and add
   observed Codex quota consumption per connected OpenAI subscription, with
   separate 5-hour and weekly totals for today and the current UTC month.

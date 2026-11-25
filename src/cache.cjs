@@ -12,7 +12,7 @@ const providerMetrics = require('./provider-metrics.cjs');
 
 const localUsage = require('./local-usage.cjs');
 const codexUsage = require('./codex-usage.cjs');
-const EMPTY = () => ({accounts:[],organizations:[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:null,checkedAt:0});
+const EMPTY = () => ({accounts:[],organizations:[],localUsage:{today:null,month:null},localWeek:{checkedAt:0,days:[]},codexUsage:[],inventoryWarning:null,checkedAt:0});
 const BUDGET_MESSAGES=new Set(['experimental_budget','no_budgets','unauthorized','forbidden','rate_limited','request_failed','invalid_payload','invalid_balance','unsupported_console','workspace_required','credential_not_readable','login_expired','login_required','plugin_ipc_unavailable']);
 function sanitizeBudgets(value){
   if(!Array.isArray(value)||value.length>100)return [];
@@ -72,6 +72,7 @@ function sanitizeSnapshot(value) {
     checkedAt:Number.isFinite(o.checkedAt)?o.checkedAt:0,
   }));
   result.localUsage=localUsage.cleanLocalUsage(value.localUsage);
+  result.localWeek=localUsage.cleanLocalWeek(value.localWeek);
   result.codexUsage=codexUsage.cleanCodexUsage(value.codexUsage,result.accounts);
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
@@ -105,7 +106,7 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
     if(busy) return busy;
     busy=(async()=>{
       try {
-        const next=await monitor.get(force);
+        const next=await monitor.get(force,snapshot);
         const previous=snapshot;
         const nextAccounts=Array.isArray(next.accounts)?next.accounts:[];
         const prevById=new Map(previous.accounts.map(a=>[a.id,a]));

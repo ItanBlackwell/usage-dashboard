@@ -771,9 +771,10 @@ function makeDashboardMonitor({ client, endpoint, env = process.env, home = os.h
     })();
     return pending[which];
   }
-  return {async get(force=false) {
-    const [accounts,orgs,usage]=await Promise.all([load('accounts',force),load('orgs',force),localUsage.readLocalUsage(client,providerFor,clock())]);
-    return {accounts:accounts.accounts,organizations:orgs.organizations,localUsage:usage,
+  return {async get(force=false,previous=null) {
+    const now=clock();
+    const [accounts,orgs,usage,week]=await Promise.all([load('accounts',force),load('orgs',force),localUsage.readLocalUsage(client,providerFor,now),localUsage.readLocalWeek(client,providerFor,now,previous?.localWeek)]);
+    return {accounts:accounts.accounts,organizations:orgs.organizations,localUsage:usage,localWeek:week,
       inventoryWarning:accounts.inventoryWarning || null,checkedAt:Math.max(accounts.checkedAt,orgs.checkedAt)};
   }};
 }
