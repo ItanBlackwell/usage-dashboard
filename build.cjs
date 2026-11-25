@@ -25,6 +25,10 @@ const switchQueue = fs.readFileSync(path.join(root,'src/switch-queue.cjs'),'utf8
 const nativeUpdate = fs.readFileSync(path.join(root,'src/native-update-layout.cjs'),'utf8');
 if (!gui.includes("const cache = require('./cache.cjs');") || !accounts.includes("const base = require('./core.cjs');") || !gui.includes("const core = require('./accounts.cjs');") || !gui.includes("const presentation = require('./presentation.cjs');") || !gui.includes("const switchQueue = require('./switch-queue.cjs');") || !gui.includes("const nativeUpdate = require('./native-update-layout.cjs');")) throw new Error('Unexpected module imports');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const metadataImport = "const pluginMetadata = require('../package.json');";
+if (!gui.includes(metadataImport) || typeof pkg.version !== 'string' || !pkg.version || typeof pkg.copyright !== 'string' || !pkg.copyright)
+  throw new Error('Missing plugin footer metadata');
+const metadata = JSON.stringify({version:pkg.version,copyright:pkg.copyright});
 const sha = /^[0-9a-f]{40}$/i.test(process.env.GITHUB_SHA || '')
   ? process.env.GITHUB_SHA.toLowerCase() : 'local-build';
 const banner = [
@@ -46,7 +50,8 @@ const text = banner + `'use strict';\n` +
   `const __presentation={exports:{}}; (function(module,exports){\n${presentation}\n})(__presentation,__presentation.exports);\n` +
   `const __switchQueue={exports:{}}; (function(module,exports){\n${switchQueue}\n})(__switchQueue,__switchQueue.exports);\n` +
   `const __nativeUpdate={exports:{}}; (function(module,exports){\n${nativeUpdate}\n})(__nativeUpdate,__nativeUpdate.exports);\n` +
-  inlineProviders(gui).replace("const core = require('./accounts.cjs');",'const core = __accounts.exports;')
+  inlineProviders(gui).replace(metadataImport,()=>`const pluginMetadata = ${metadata};`)
+     .replace("const core = require('./accounts.cjs');",'const core = __accounts.exports;')
      .replace("const presentation = require('./presentation.cjs');",'const presentation = __presentation.exports;')
      .replace("const cache = require('./cache.cjs');","const cache = __cache.exports;")
      .replace("const switchQueue = require('./switch-queue.cjs');","const switchQueue = __switchQueue.exports;")

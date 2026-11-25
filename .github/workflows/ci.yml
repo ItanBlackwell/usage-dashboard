@@ -404,6 +404,31 @@ jobs:
             }finally{store.stop();await fs.rm(dir,{recursive:true,force:true});}
           })().catch(e=>{console.error(e);process.exitCode=1;});
           NODE
+      - name: Verify popup footer metadata and placement
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs');
+          const pkg=require('./package.json');
+          const source=fs.readFileSync('src/gui-entry.cjs','utf8');
+          const bundle=fs.readFileSync('dist/gui-experimental.cjs','utf8');
+          assert.ok(bundle.includes('const pluginMetadata = '+JSON.stringify({version:pkg.version,copyright:pkg.copyright})+';'));
+          assert.ok(!bundle.includes("require('../package.json')"));
+          const render=new Function('$','add','palette','pluginMetadata',
+            source.slice(source.indexOf('function renderPopupFooter('),source.indexOf('function createView('))+';return renderPopupFooter;');
+          const root={children:[]},node=(tag,style,text)=>({tag,style,text,attrs:{},setAttribute(k,v){this.attrs[k]=v;}});
+          const append=(p,n)=>(p.children.push(n),n);
+          const body=append(root,node('div','',''));
+          const footer=render(node,append,{border:'#444',muted:'#999'},pkg)(root);
+          assert.equal(root.children.at(-1),footer);
+          assert.equal(footer.tag,'footer');
+          assert.equal(footer.text,'v'+pkg.version+' · '+pkg.copyright.replace(/^Copyright \(c\) /i,'© '));
+          assert.equal(footer.attrs['data-pv-popup-footer'],'true');
+          assert.ok(footer.style.includes('font-size:9px'));
+          body.children=[];assert.equal(root.children.at(-1),footer);
+          assert.ok(source.includes("const body=add(root,$('div'));\n  if(compact)renderPopupFooter(root);"));
+          NODE
       - name: Verify seven-day history and interactive line chart
         shell: bash
         run: |

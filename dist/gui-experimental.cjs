@@ -2444,6 +2444,7 @@ const cache = __cache.exports;
 const switchQueue = __switchQueue.exports;
 const nativeUpdate = __nativeUpdate.exports;
 const weeklyChart = __weekly_chart.exports;
+const pluginMetadata = {"version":"0.14.0","copyright":"Copyright (c) 2026 ItanBlackwell."};
 
 const ProviderBalanceSchema = Schema.Struct({amount:Schema.Number,currency:Schema.String,kind:Schema.String});
 const WindowSchema = Schema.Struct({ label:Schema.String, usedPercent:Schema.Number,
@@ -3088,6 +3089,14 @@ async function publicIntegrationFallback(ctx) {
     return {accounts,organizations:[],localUsage:{today:null,month:null},localWeek:{checkedAt:0,days:[]},codexUsage:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
+function renderPopupFooter(root){
+  // Keep the footer outside the refreshed account body and use build metadata.
+  const copyright=pluginMetadata.copyright.replace(/^Copyright \(c\) /i,'© ');
+  const footer=add(root,$('footer',`margin-top:8px;padding-top:6px;border-top:1px solid ${palette.border};text-align:center;font-size:9px;line-height:1.4;color:${palette.muted};overflow-wrap:anywhere`,
+    'v'+pluginMetadata.version+' · '+copyright));
+  footer.setAttribute('data-pv-popup-footer','true');
+  return footer;
+}
 function createView(ctx,client,{compact=false}={}) {
   const root=$('section',`box-sizing:border-box;min-width:0;${compact?'overflow:visible;':'overflow-y:auto;max-height:100%;'}padding:${compact?'10px 11px':'16px'};color:${palette.text};font-family:inherit;background:${compact?'var(--v2-background-bg-layer-02, var(--background,#18191d))':'transparent'}`);
   const header=add(root,$('div',`display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid ${palette.border}`));
@@ -3096,6 +3105,7 @@ function createView(ctx,client,{compact=false}={}) {
   add(refresh,$('span','display:inline-block;transform-origin:center;line-height:1','↻'));
   refresh.type='button';refresh.setAttribute('aria-label',t(ctx,'usage.retry'));refresh.title=t(ctx,'usage.retry');
   const body=add(root,$('div'));
+  if(compact)renderPopupFooter(root);
   let alive=true,running=false,hasData=false,lastSnapshot=null,lastServerSnapshot=null,queuedRefresh=false,coldRefreshRequested=false,switchSequence=0,commitVersion=0;
   const stableOrder=stableAccountOrder;
   const desiredByProvider=new Map();

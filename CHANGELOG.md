@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a small version and copyright footer at the bottom of the usage popup,
+  using the package metadata embedded at build time.
+
 - Increase the popup width and maximum height by approximately 15% while
   respecting viewport bounds; refine card spacing and the popup header.
 - Add an interactive seven-day UTC line chart to **Usage estimate**, with
