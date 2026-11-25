@@ -736,6 +736,105 @@ async function readLocalUsage(client,providerFor,now=Date.now()){
 module.exports={periodStart,parseStats,cleanLocalUsage,readLocalUsage};
 
 })(__local_usage,__local_usage.exports);
+const __codex_usage={exports:{}}; (function(module,exports){
+/*
+ * Usage Dashboard
+ * Copyright (c) 2026 ItanBlackwell.
+ * SPDX-License-Identifier: MPL-2.0
+ * Source: https://github.com/ItanBlackwell/usage-dashboard
+ */
+'use strict';
+const {periodStart}=__local_usage.exports;
+
+const windows={fiveHour:'5-hour',weekly:'Weekly'};
+const periods=['today','month'];
+const time=n=>Number.isSafeInteger(n)&&n>0&&n<=8640000000000000;
+const percent=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=100;
+const amount=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1e9;
+const eligible=a=>a?.provider==='codex'&&a.kind==='subscription'&&a.source==='OpenCode'&&
+  a.message!=='login_required'&&typeof a.id==='string'&&a.id.length>0&&a.id.length<=120;
+
+function cleanBaseline(b){
+  return b&&time(b.at)&&time(b.resetsAt)&&b.resetsAt>b.at&&percent(b.peak)
+    ?{at:b.at,resetsAt:b.resetsAt,peak:b.peak}:null;
+}
+function cleanPeriod(p,period){
+  return p&&time(p.from)&&time(p.to)&&p.to>p.from&&p.from===periodStart(period,p.to)&&amount(p.amount)
+    ?{from:p.from,to:p.to,amount:p.amount}:null;
+}
+function cleanWindow(w){
+  return {baseline:cleanBaseline(w?.baseline),today:cleanPeriod(w?.today,'today'),month:cleanPeriod(w?.month,'month')};
+}
+// Only existing connection IDs and bounded numeric aggregates are retained.
+function cleanCodexUsage(value,accounts){
+  if(!Array.isArray(value)||value.length>80)return [];
+  const ids=new Set((accounts||[]).filter(eligible).map(a=>a.id)),seen=new Set(),rows=[];
+  for(const row of value){
+    if(!ids.has(row?.id)||seen.has(row.id))continue;
+    seen.add(row.id);
+    rows.push({id:row.id,fiveHour:cleanWindow(row.fiveHour),weekly:cleanWindow(row.weekly)});
+  }
+  return rows;
+}
+function sample(account,label,now){
+  if(account.state!=='ok'||account.message!=='ok'||!time(account.checkedAt)||account.checkedAt>now)return null;
+  const matches=(account.windows||[]).filter(w=>w?.label===label);
+  if(matches.length!==1)return null;
+  const w=matches[0];
+  return percent(w.usedPercent)&&time(w.resetsAt)&&w.resetsAt>account.checkedAt
+    ?{at:account.checkedAt,resetsAt:w.resetsAt,peak:w.usedPercent}:null;
+}
+function observe(previous,current,now){
+  const out=cleanWindow(previous);
+  for(const period of periods){
+    if(out[period]?.from!==periodStart(period,now)||out[period]?.to>now)out[period]=null;
+  }
+  const old=out.baseline;
+  if(!current||(old&&current.at<=old.at))return out;
+  let delta=null,since=null;
+  if(old){
+    // Tolerate second-resolution reset timestamps, never compare across expiry.
+    if(current.at<old.resetsAt&&Math.abs(current.resetsAt-old.resetsAt)<=1000){
+      if(current.peak>=old.peak){delta=current.peak-old.peak;since=old.at;}
+      // A downward correction is not a refund or a reset. Keep the high-water
+      // mark so its rebound cannot be counted twice.
+      current={...current,peak:Math.max(current.peak,old.peak)};
+    }else if(current.at>=old.resetsAt&&current.resetsAt>old.resetsAt){
+      // Observe only the new window's use, never the unseen old-window tail.
+      delta=current.peak;since=old.resetsAt;
+    }
+    // A moved reset time before expiry is ambiguous: start a new baseline.
+  }
+  out.baseline=current;
+  if(delta!==null){
+    for(const period of periods){
+      const from=periodStart(period,now);
+      // Do not allocate a delta across a UTC reporting boundary.
+      if(since<from||current.at<=from)continue;
+      const total=(out[period]?.amount??0)+delta;
+      if(amount(total))out[period]={from,to:current.at,amount:total};
+    }
+  }
+  return out;
+}
+function advanceCodexUsage(previous,accounts,inventoryWarning,now=Date.now()){
+  if(!time(now))return cleanCodexUsage(previous,accounts);
+  const existing=new Map(cleanCodexUsage(previous,accounts).map(row=>[row.id,row]));
+  const seen=new Set(),rows=[];
+  for(const account of (accounts||[]).filter(eligible).slice(0,80)){
+    if(seen.has(account.id))continue;
+    seen.add(account.id);
+    const prior=existing.get(account.id),row={id:account.id};
+    for(const [kind,label] of Object.entries(windows)){
+      row[kind]=observe(prior?.[kind],inventoryWarning?null:sample(account,label,now),now);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+module.exports={cleanCodexUsage,advanceCodexUsage};
+
+})(__codex_usage,__codex_usage.exports);
 const __accounts={exports:{}}; (function(module,exports){
 /*
  * Usage Dashboard
@@ -1561,7 +1660,8 @@ const os = require('node:os');
 const providerMetrics = __provider_metrics.exports;
 
 const localUsage = __local_usage.exports;
-const EMPTY = () => ({accounts:[],organizations:[],localUsage:{today:null,month:null},inventoryWarning:null,checkedAt:0});
+const codexUsage = __codex_usage.exports;
+const EMPTY = () => ({accounts:[],organizations:[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:null,checkedAt:0});
 const BUDGET_MESSAGES=new Set(['experimental_budget','no_budgets','unauthorized','forbidden','rate_limited','request_failed','invalid_payload','invalid_balance','unsupported_console','workspace_required','credential_not_readable','login_expired','login_required','plugin_ipc_unavailable']);
 function sanitizeBudgets(value){
   if(!Array.isArray(value)||value.length>100)return [];
@@ -1621,6 +1721,7 @@ function sanitizeSnapshot(value) {
     checkedAt:Number.isFinite(o.checkedAt)?o.checkedAt:0,
   }));
   result.localUsage=localUsage.cleanLocalUsage(value.localUsage);
+  result.codexUsage=codexUsage.cleanCodexUsage(value.codexUsage,result.accounts);
   result.checkedAt=Number.isFinite(value.checkedAt)?value.checkedAt:0;
   result.inventoryWarning=typeof value.inventoryWarning==='string'?value.inventoryWarning.slice(0,64):null;
   return result;
@@ -1680,7 +1781,8 @@ function persistentMonitor(monitor,{directory=cacheDirectory(),settingsPath,cloc
           const prev=previous.organizations.find(p=>p.id===o.id);
           return o.state!=='ok' && prev?.state==='ok' ? {...prev,state:'stale'} : o;
         });
-        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs});
+        const estimates=codexUsage.advanceCodexUsage(previous.codexUsage,accounts,next.inventoryWarning,clock());
+        snapshot=sanitizeSnapshot({...next,accounts,organizations:orgs,codexUsage:estimates});
         inform();
         await write();
       } catch {} finally {busy=null;}
@@ -1847,7 +1949,7 @@ function mergeInventoryFallback(inventory,previous) {
       budgetMessage:p.provider==='opencode'?'plugin_ipc_unavailable':null,
       checkedAt:p.checkedAt,state:'stale',message:'plugin_ipc_unavailable'};
   });
-  const merged={accounts,organizations:inventory?.organizations||[],localUsage:{today:null,month:null},inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
+  const merged={accounts,organizations:inventory?.organizations||[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:inventory?.inventoryWarning??null,checkedAt:inventory?.checkedAt??0};
   return merged;
 }
 function formatCurrency(amount,currency) {
@@ -1917,8 +2019,14 @@ function localUsagePeriod(snapshot,period,now=Date.now()){
   const from=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),period==='today'?d.getUTCDate():1);
   return v&&v.from===from&&Number.isFinite(v.to)&&v.to>from&&v.to<=now&&Array.isArray(v.rows)?v:null;
 }
+function codexUsagePeriod(snapshot,id,kind,period,now=Date.now()){
+  if(!['fiveHour','weekly'].includes(kind)||!['today','month'].includes(period))return null;
+  const v=snapshot?.codexUsage?.find(a=>a.id===id)?.[kind]?.[period],d=new Date(now);
+  const from=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),period==='today'?d.getUTCDate():1);
+  return v&&v.from===from&&Number.isFinite(v.to)&&v.to>from&&v.to<=now&&Number.isFinite(v.amount)&&v.amount>=0?v:null;
+}
 module.exports = { connectedSubscriptions, connectedApiKeys, availableApiBudgets, minimumRemaining,
-  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,openRouterBudget,formatCurrency,formatSpend,needsLocalUsage,localUsagePeriod,mergeInventoryFallback };
+  indicatorAccount,indicatorValue,classifyWindow,indicatorWindows,indicatorPresentation,tightestGeneralBudget,openRouterBudget,formatCurrency,formatSpend,needsLocalUsage,localUsagePeriod,codexUsagePeriod,mergeInventoryFallback };
 
 
 })(__presentation,__presentation.exports);
@@ -2129,9 +2237,13 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
 const LocalUsageRowSchema=Schema.Struct({provider:Schema.String,cost:Schema.NullOr(Schema.Number),tokens:Schema.NullOr(Schema.Number),steps:Schema.NullOr(Schema.Number)});
 const LocalUsagePeriodSchema=Schema.Struct({from:Schema.Number,to:Schema.Number,rows:Schema.Array(LocalUsageRowSchema)});
 const LocalUsageSchema=Schema.Struct({today:Schema.NullOr(LocalUsagePeriodSchema),month:Schema.NullOr(LocalUsagePeriodSchema)});
+const CodexUsagePeriodSchema=Schema.Struct({from:Schema.Number,to:Schema.Number,amount:Schema.Number});
+const CodexUsageBaselineSchema=Schema.Struct({at:Schema.Number,resetsAt:Schema.Number,peak:Schema.Number});
+const CodexUsageWindowSchema=Schema.Struct({baseline:Schema.NullOr(CodexUsageBaselineSchema),today:Schema.NullOr(CodexUsagePeriodSchema),month:Schema.NullOr(CodexUsagePeriodSchema)});
+const CodexUsageAccountSchema=Schema.Struct({id:Schema.String,fiveHour:CodexUsageWindowSchema,weekly:CodexUsageWindowSchema});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  localUsage:LocalUsageSchema,inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v7',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+  localUsage:LocalUsageSchema,codexUsage:Schema.Array(CodexUsageAccountSchema),inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v8',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -2507,19 +2619,50 @@ function renderConsoleBudgets(ctx,card,account,statisticsParent=card){
     }
   }
 }
-// Keep local provider history separate from individual account cards.
+// Keep local provider history separate from account-level Codex quota observations.
 function renderLocalUsage(ctx,parent,data,accounts){
   const now=Date.now(),providers=[...new Set(accounts.filter(a=>presentation.needsLocalUsage(a,now)).map(a=>a.provider))];
-  if(!providers.length)return;
+  const codexAccounts=accounts.filter(a=>a.provider==='codex'&&a.kind==='subscription'&&a.source==='OpenCode');
+  if(!providers.length&&!codexAccounts.length)return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru'),tr=(en,rus)=>ru?rus:en;
   const wrapper=compactCard(parent);
   wrapper.setAttribute('data-pv-local-usage','true');
   const details=add(wrapper,$('details','min-width:0;font-size:10px;color:'+palette.muted));
   const expansionKey='local-usage'; // Account IDs contain a provider separator.
   details.open=expandedAccountDetails.has(expansionKey);
-  add(details,$('summary','cursor:pointer;font-size:11px;color:'+palette.text,tr('OpenCode usage estimate','Оценка расхода OpenCode')));
+  add(details,$('summary','cursor:pointer;font-size:11px;color:'+palette.text,tr('Usage estimate','Оценка расхода')));
   details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(expansionKey);else expandedAccountDetails.delete(expansionKey);});
   const card=add(details,$('div','min-width:0;padding-top:3px'));
+  if(codexAccounts.length){
+    const group=add(card,$('div','min-width:0;margin-bottom:4px'));
+    group.setAttribute('data-pv-codex-usage','true');
+    add(group,$('strong','font-size:10px;color:'+palette.text,'OpenAI · Codex'));
+    const info=add(group,$('div','font-size:9.5px;line-height:1.25;color:'+palette.muted,
+      tr('Observed quota use · UTC · may be incomplete','Наблюдаемый расход квот · UTC · возможны пропуски')));
+    info.title=tr('Account-wide estimates include usage outside OpenCode. Unobserved intervals and ambiguous reporting boundaries are omitted. No historical backfill.',
+      'Оценка по всему аккаунту включает использование вне OpenCode. Пропущенные интервалы и неоднозначные границы периодов не учитываются. История до начала наблюдений не восстанавливается.');
+    const fmt=new Intl.NumberFormat(ru?'ru-RU':'en-US',{maximumFractionDigits:2});
+    for(const account of codexAccounts){
+      const section=add(group,$('div','margin-top:4px;padding-top:4px;border-top:1px solid '+palette.border));
+      const label=add(section,$('strong','display:block;font-size:10px;color:'+palette.text+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap',account.label));
+      label.title=account.label;
+      const grid=add(section,$('div','display:grid;grid-template-columns:minmax(0,1fr) repeat(2,minmax(0,auto));column-gap:8px;row-gap:2px;align-items:center;margin-top:2px'));
+      const style='font-size:9.5px;color:'+palette.muted;
+      add(grid,$('span',style,tr('Quota','Лимит')));
+      for(const title of [tr('Today','Сегодня'),tr('Month','Месяц')])add(grid,$('span',style+';text-align:right',title));
+      for(const [kind,title] of [['fiveHour',tr('5 hours','5 часов')],['weekly',tr('Week','Неделя')]]){
+        add(grid,$('span',style,title));
+        for(const period of ['today','month']){
+          const value=presentation.codexUsagePeriod(data,account.id,kind,period,now);
+          const cell=add(grid,$('span','font-size:10px;color:'+palette.text+';font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap',
+            value?'≈ '+fmt.format(value.amount)+' '+tr('pp','п.п.'):'—'));
+          cell.title=value?tr('Observed through: ','По состоянию на: ')+new Date(value.to).toISOString():
+            tr('No comparable quota observations in this period.','Нет сопоставимых наблюдений квоты за этот период.');
+        }
+      }
+    }
+  }
+  if(!providers.length)return;
   add(card,$('div','font-size:9.5px;line-height:1.25;color:'+palette.muted,
     tr('All local accounts · UTC · not provider charges','Все локальные аккаунты · UTC · не списания')));
   const periods=['today','month'].map(period=>[period,presentation.localUsagePeriod(data,period,now)]);
@@ -2705,7 +2848,7 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],localUsage:{today:null,month:null},inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
+    return {accounts,organizations:[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
 function createView(ctx,client,{compact=false}={}) {

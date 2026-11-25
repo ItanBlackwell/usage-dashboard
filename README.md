@@ -87,10 +87,14 @@ a budget; unavailable balances use a dash rather than zero, and unavailable
 quotas are identified separately.
 Expand **Statistics & details** to inspect spending, tokens, model counters,
 additional budget policies and detailed availability reasons.
-When a wallet, general spending cap or subscription quota cannot be read, a
-separate collapsed **OpenCode usage estimate** section provides today's and
-the current month's recorded local usage (UTC), aggregated by provider
-across accounts. It is not a provider charge, account balance or quota.
+The collapsed **Usage estimate** section shows observed Codex subscription
+quota consumption per connected OpenAI account for today and the current UTC
+month, in percentage points for the 5-hour and weekly windows. Estimates
+start with new observations, may include usage outside OpenCode, and can
+exceed 100 points across multiple resets. Missing comparisons show a dash.
+When a wallet, general spending cap or subscription quota cannot be read,
+the same section also provides recorded local usage by provider across
+accounts. Local model cost is not a provider charge, balance or quota.
 
 Since version 0.14.0, browser-based billing and the companion extension are retired.
 Existing provider connections are used directly; no extra browser login is required.

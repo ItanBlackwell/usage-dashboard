@@ -42,9 +42,13 @@ const OrgSchema = Schema.Struct({ id:Schema.String,provider:Schema.String,label:
 const LocalUsageRowSchema=Schema.Struct({provider:Schema.String,cost:Schema.NullOr(Schema.Number),tokens:Schema.NullOr(Schema.Number),steps:Schema.NullOr(Schema.Number)});
 const LocalUsagePeriodSchema=Schema.Struct({from:Schema.Number,to:Schema.Number,rows:Schema.Array(LocalUsageRowSchema)});
 const LocalUsageSchema=Schema.Struct({today:Schema.NullOr(LocalUsagePeriodSchema),month:Schema.NullOr(LocalUsagePeriodSchema)});
+const CodexUsagePeriodSchema=Schema.Struct({from:Schema.Number,to:Schema.Number,amount:Schema.Number});
+const CodexUsageBaselineSchema=Schema.Struct({at:Schema.Number,resetsAt:Schema.Number,peak:Schema.Number});
+const CodexUsageWindowSchema=Schema.Struct({baseline:Schema.NullOr(CodexUsageBaselineSchema),today:Schema.NullOr(CodexUsagePeriodSchema),month:Schema.NullOr(CodexUsagePeriodSchema)});
+const CodexUsageAccountSchema=Schema.Struct({id:Schema.String,fiveHour:CodexUsageWindowSchema,weekly:CodexUsageWindowSchema});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
-  localUsage:LocalUsageSchema,inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
-const Metrics = Ipc.define({id:'usage-dashboard.metrics.v7',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
+  localUsage:LocalUsageSchema,codexUsage:Schema.Array(CodexUsageAccountSchema),inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+const Metrics = Ipc.define({id:'usage-dashboard.metrics.v8',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
   text:'var(--text-strong, var(--v2-text-text-base, #e3e6ed))',
@@ -420,19 +424,50 @@ function renderConsoleBudgets(ctx,card,account,statisticsParent=card){
     }
   }
 }
-// Keep local provider history separate from individual account cards.
+// Keep local provider history separate from account-level Codex quota observations.
 function renderLocalUsage(ctx,parent,data,accounts){
   const now=Date.now(),providers=[...new Set(accounts.filter(a=>presentation.needsLocalUsage(a,now)).map(a=>a.provider))];
-  if(!providers.length)return;
+  const codexAccounts=accounts.filter(a=>a.provider==='codex'&&a.kind==='subscription'&&a.source==='OpenCode');
+  if(!providers.length&&!codexAccounts.length)return;
   const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru'),tr=(en,rus)=>ru?rus:en;
   const wrapper=compactCard(parent);
   wrapper.setAttribute('data-pv-local-usage','true');
   const details=add(wrapper,$('details','min-width:0;font-size:10px;color:'+palette.muted));
   const expansionKey='local-usage'; // Account IDs contain a provider separator.
   details.open=expandedAccountDetails.has(expansionKey);
-  add(details,$('summary','cursor:pointer;font-size:11px;color:'+palette.text,tr('OpenCode usage estimate','Оценка расхода OpenCode')));
+  add(details,$('summary','cursor:pointer;font-size:11px;color:'+palette.text,tr('Usage estimate','Оценка расхода')));
   details.addEventListener('toggle',()=>{if(details.open)expandedAccountDetails.add(expansionKey);else expandedAccountDetails.delete(expansionKey);});
   const card=add(details,$('div','min-width:0;padding-top:3px'));
+  if(codexAccounts.length){
+    const group=add(card,$('div','min-width:0;margin-bottom:4px'));
+    group.setAttribute('data-pv-codex-usage','true');
+    add(group,$('strong','font-size:10px;color:'+palette.text,'OpenAI · Codex'));
+    const info=add(group,$('div','font-size:9.5px;line-height:1.25;color:'+palette.muted,
+      tr('Observed quota use · UTC · may be incomplete','Наблюдаемый расход квот · UTC · возможны пропуски')));
+    info.title=tr('Account-wide estimates include usage outside OpenCode. Unobserved intervals and ambiguous reporting boundaries are omitted. No historical backfill.',
+      'Оценка по всему аккаунту включает использование вне OpenCode. Пропущенные интервалы и неоднозначные границы периодов не учитываются. История до начала наблюдений не восстанавливается.');
+    const fmt=new Intl.NumberFormat(ru?'ru-RU':'en-US',{maximumFractionDigits:2});
+    for(const account of codexAccounts){
+      const section=add(group,$('div','margin-top:4px;padding-top:4px;border-top:1px solid '+palette.border));
+      const label=add(section,$('strong','display:block;font-size:10px;color:'+palette.text+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap',account.label));
+      label.title=account.label;
+      const grid=add(section,$('div','display:grid;grid-template-columns:minmax(0,1fr) repeat(2,minmax(0,auto));column-gap:8px;row-gap:2px;align-items:center;margin-top:2px'));
+      const style='font-size:9.5px;color:'+palette.muted;
+      add(grid,$('span',style,tr('Quota','Лимит')));
+      for(const title of [tr('Today','Сегодня'),tr('Month','Месяц')])add(grid,$('span',style+';text-align:right',title));
+      for(const [kind,title] of [['fiveHour',tr('5 hours','5 часов')],['weekly',tr('Week','Неделя')]]){
+        add(grid,$('span',style,title));
+        for(const period of ['today','month']){
+          const value=presentation.codexUsagePeriod(data,account.id,kind,period,now);
+          const cell=add(grid,$('span','font-size:10px;color:'+palette.text+';font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap',
+            value?'≈ '+fmt.format(value.amount)+' '+tr('pp','п.п.'):'—'));
+          cell.title=value?tr('Observed through: ','По состоянию на: ')+new Date(value.to).toISOString():
+            tr('No comparable quota observations in this period.','Нет сопоставимых наблюдений квоты за этот период.');
+        }
+      }
+    }
+  }
+  if(!providers.length)return;
   add(card,$('div','font-size:9.5px;line-height:1.25;color:'+palette.muted,
     tr('All local accounts · UTC · not provider charges','Все локальные аккаунты · UTC · не списания')));
   const periods=['today','month'].map(period=>[period,presentation.localUsagePeriod(data,period,now)]);
@@ -618,7 +653,7 @@ async function publicIntegrationFallback(ctx) {
     if(!api||typeof api.list!=='function')return null;
     const raw=await bounded(signal=>api.list(undefined,{signal}),6000);
     const accounts=publicIntegrationAccounts(raw);
-    return {accounts,organizations:[],localUsage:{today:null,month:null},inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
+    return {accounts,organizations:[],localUsage:{today:null,month:null},codexUsage:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
 function createView(ctx,client,{compact=false}={}) {
