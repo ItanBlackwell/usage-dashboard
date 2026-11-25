@@ -27,7 +27,7 @@ Desktop versions.
 
 ## Installation (Windows)
 
-1. Download **Usage-Dashboard-Portable-0.14.0.zip** from the [latest GitHub Release](https://github.com/ItanBlackwell/usage-dashboard/releases/latest).
+1. Download **Usage-Dashboard-Portable-0.14.1.zip** from the [latest GitHub Release](https://github.com/ItanBlackwell/usage-dashboard/releases/latest).
 2. Extract the ZIP and completely close OpenCode Desktop.
 3. Run **`Install.cmd`** by double-clicking it, then restart OpenCode.
 4. Go to **Settings → General → Interface layout** and choose **Side tabs**, **Inbox**, or **Top tabs**.

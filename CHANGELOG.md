@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.1
 
 - Add a small version and copyright footer at the bottom of the usage popup,
   with a GitHub repository link, using package metadata embedded at build time.
