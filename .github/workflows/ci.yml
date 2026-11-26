@@ -39,6 +39,25 @@ jobs:
           diff -u <(sed '/^ \* Source-Revision:/d' "$RUNNER_TEMP/committed-bundle.cjs") <(sed '/^ \* Source-Revision:/d' dist/gui-experimental.cjs)
           node --check dist/gui-experimental.cjs
           node -e 'const p=require("./package.json");if(p.name!=="usage-dashboard"||!p.exports?.["./gui-experimental"])process.exit(1)'
+      - name: Verify updater release and checksum validation
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const u=require('./src/auto-update.cjs');
+          assert.equal(u.newer('0.15.0','0.14.1'),true);
+          assert.equal(u.newer('0.14.1','0.14.1'),false);
+          assert.equal(u.newer('0.15.0-rc.1','0.14.1'),false);
+          assert.equal(u.newer('0.9.0','0.14.1'),false);
+          assert.equal(u.allowedUrl('https://evil.example/a'),false);
+          assert.equal(u.allowedUrl('https://github.com/other/repo/releases/download/v1/x'),false);
+          const name='Usage-Dashboard-Portable-0.15.0.zip',hash='a'.repeat(64);
+          assert.equal(u.checksumFor(hash+'  '+name+'\n',name),hash);
+          assert.throws(()=>u.checksumFor(hash+'  '+name+'\n'+hash+'  '+name,name));
+          assert.equal(u.selectRelease({draft:false,prerelease:true,tag_name:'v0.15.0'},'0.14.1'),null);
+          assert.throws(()=>u.selectRelease({draft:false,prerelease:false,tag_name:'v0.15.0',assets:[]},'0.14.1'));
+          assert.throws(()=>u.readPortable(Buffer.alloc(22),'0.15.0'));
+          NODE
       - name: Verify balance presentation and IPC fallback
         shell: bash
         run: |
