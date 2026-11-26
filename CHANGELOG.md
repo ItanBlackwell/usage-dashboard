@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Show only available quota series in the weekly chart, retaining recent
+  observed history and explaining empty quota charts without inventing usage.
+
 ## 0.14.1
 
 - Add a small version and copyright footer at the bottom of the usage popup,
