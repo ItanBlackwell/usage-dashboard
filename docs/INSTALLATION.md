@@ -19,6 +19,10 @@ The installer puts files into
 or an absolute `OPENCODE_CONFIG_DIR` if you configured one. Do not add a second
 plugin entry to `opencode.jsonc`: OpenCode automatically discovers the folder.
 
+## Automatic updates (Windows)
+
+The popup footer includes **Updates**. By default, the plugin checks stable GitHub releases at startup and every 24 hours and asks before installing. Choose **Automatic** to install new stable versions without confirmation, or **Manual** to disable scheduled checks. Restart OpenCode to activate installed updates. The updater checks the portable ZIP against SHA256SUMS.txt and only replaces the installed package manifest and GUI bundle; settings, credentials and usage history remain untouched. It does not execute downloaded scripts. Checksums are not independent code signatures. If updating fails, close OpenCode and reinstall a trusted portable ZIP. The previous two files are retained in `.update-backup` in the plugin directory. A leftover `.update-lock` blocks further automatic updates; close OpenCode and use the trusted installer to recover, then remove the lock only after verifying the installation.
+
 ## Upgrading and removal
 
 The installer no longer downloads or installs a browser runtime. It removes
