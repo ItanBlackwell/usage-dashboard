@@ -56,7 +56,7 @@ function sample(account,label,now){
   return percent(w.usedPercent)&&time(w.resetsAt)&&w.resetsAt>account.checkedAt
     ?{at:account.checkedAt,resetsAt:w.resetsAt,peak:w.usedPercent}:null;
 }
-function observe(previous,current,now){
+function observe(previous,current,now,kind){
   const out=cleanWindow(previous),today=periodStart('today',now);
   out.daily=out.daily.filter(d=>d.from>=today-6*DAY_MS&&d.from<=today&&d.to<=now);
   for(const period of periods){
@@ -66,12 +66,20 @@ function observe(previous,current,now){
   if(!current||(old&&current.at<=old.at))return out;
   let delta=null,since=null;
   if(old){
-    // Tolerate second-resolution reset timestamps, never compare across expiry.
-    if(current.at<old.resetsAt&&Math.abs(current.resetsAt-old.resetsAt)<=1000){
+    // Weekly reset estimates can move slightly between polls. Allow bounded
+    // clock/rounding drift, but never compare across the previous expiry.
+    const tolerance=kind==='weekly'?60000:1000;
+    if(current.at<old.resetsAt&&Math.abs(current.resetsAt-old.resetsAt)<=tolerance){
       if(current.peak>=old.peak){delta=current.peak-old.peak;since=old.at;}
       // A downward correction is not a refund or a reset. Keep the high-water
       // mark so its rebound cannot be counted twice.
       current={...current,peak:Math.max(current.peak,old.peak)};
+    }else if(kind==='weekly'&&old.peak===0&&current.peak>0&&
+      current.at<old.resetsAt&&current.resetsAt>old.resetsAt){
+      // An unused weekly window may acquire its real reset anchor on first use.
+      // From an observed zero, the newly observed use cannot double count a
+      // prior positive peak. Do not backfill outside the observed interval.
+      delta=current.peak;since=old.at;
     }else if(current.at>=old.resetsAt&&current.resetsAt>old.resetsAt){
       // Observe only the new window's use, never the unseen old-window tail.
       delta=current.peak;since=old.resetsAt;
@@ -100,7 +108,7 @@ function advanceCodexUsage(previous,accounts,inventoryWarning,now=Date.now()){
     seen.add(account.id);
     const prior=existing.get(account.id),row={id:account.id};
     for(const [kind,label] of Object.entries(windows)){
-      row[kind]=observe(prior?.[kind],inventoryWarning?null:sample(account,label,now),now);
+      row[kind]=observe(prior?.[kind],inventoryWarning?null:sample(account,label,now),now,kind);
     }
     rows.push(row);
   }
