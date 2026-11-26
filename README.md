@@ -110,6 +110,10 @@ Existing provider connections are used directly; no extra browser login is requi
 See [provider metrics and endpoints](docs/PROVIDER_METRICS.md) for the
 supported and experimental contracts.
 
+## Updates
+
+The popup footer provides update checks and optional automatic installation for standard Windows portable installations. Stable GitHub Releases are verified against SHA-256 checksums; restart OpenCode to activate updates. See [installation and troubleshooting](docs/INSTALLATION.md#automatic-updates-windows).
+
 ## Features
 
 - Lower-left icon with colored quota rings and a compact account popup across all three layouts.
