@@ -19,6 +19,7 @@ const switchQueue = require('./switch-queue.cjs');
 const nativeUpdate = require('./native-update-layout.cjs');
 const weeklyChart = require('./weekly-chart.cjs');
 const pluginMetadata = require('../package.json');
+const autoUpdate = require('./auto-update.cjs');
 
 const ProviderBalanceSchema = Schema.Struct({amount:Schema.Number,currency:Schema.String,kind:Schema.String});
 const WindowSchema = Schema.Struct({ label:Schema.String, usedPercent:Schema.Number,
@@ -51,6 +52,11 @@ const CodexUsageWindowSchema=Schema.Struct({baseline:Schema.NullOr(CodexUsageBas
 const CodexUsageAccountSchema=Schema.Struct({id:Schema.String,fiveHour:CodexUsageWindowSchema,weekly:CodexUsageWindowSchema});
 const SnapshotSchema = Schema.Struct({ accounts:Schema.Array(AccountSchema),organizations:Schema.Array(OrgSchema),
   localUsage:LocalUsageSchema,localWeek:LocalWeekSchema,codexUsage:Schema.Array(CodexUsageAccountSchema),inventoryWarning:Schema.NullOr(Schema.String),checkedAt:Schema.Number });
+const UpdateStatus=Schema.Struct({mode:Schema.String,state:Schema.String,version:Schema.NullOr(Schema.String),checkedAt:Schema.Number});
+const Updates=Ipc.define({id:'usage-dashboard.updates.v1',state:UpdateStatus,methods:{
+  get:{output:UpdateStatus},check:{output:UpdateStatus},install:{output:UpdateStatus},
+  setMode:{input:Schema.Struct({mode:Schema.String}),output:UpdateStatus}
+}});
 const Metrics = Ipc.define({id:'usage-dashboard.metrics.v9',state:SnapshotSchema,methods:{get:{output:SnapshotSchema},refresh:{output:SnapshotSchema},activate:{input:Schema.Struct({id:Schema.String}),output:SnapshotSchema}}});
 
 const palette = {
@@ -663,6 +669,58 @@ async function publicIntegrationFallback(ctx) {
     return {accounts,organizations:[],localUsage:{today:null,month:null},localWeek:{checkedAt:0,days:[]},codexUsage:[],inventoryWarning:'plugin_main_unavailable',checkedAt:Date.now()};
   }catch{return null;}
 }
+function renderUpdateControls(ctx,root){
+  const ru=String(ctx.locale?.locale?.()||'en').toLowerCase().startsWith('ru');
+  const tr=(en,rus)=>ru?rus:en;
+  let client;try{client=ctx.main(Updates);}catch{return ()=>{};}
+  if(!client)return ()=>{};
+  const block=add(root,$('details','margin-top:4px;text-align:center;font-size:10px'));
+  const summary=add(block,$('summary','cursor:pointer;color:'+palette.muted,tr('Updates','Обновления')));
+  const select=add(block,$('select','max-width:100%;font:inherit;color:inherit;background:transparent;margin:5px 0'));
+  select.setAttribute('aria-label',tr('Update mode','Режим обновления'));
+  for(const [value,label] of [['notify',tr('Notify me','Уведомлять')],['auto',tr('Automatic','Автоматически')],['manual',tr('Manual','Вручную')]]){
+    const option=add(select,$('option','',label));option.value=value;
+  }
+  const line=add(block,$('div','color:'+palette.muted+';margin:2px 0'));
+  const actions=add(block,$('div','display:flex;justify-content:center;gap:6px;margin:4px 0'));
+  const button=(text)=>{const b=add(actions,$('button','font:inherit;color:inherit;background:transparent;border:1px solid '+palette.border+';border-radius:4px;cursor:pointer;padding:3px 7px',text));b.type='button';return b;};
+  const check=button(tr('Check','Проверить')),install=button(tr('Install update','Обновить'));
+  let alive=true,running=false,last=null;
+  function paint(s){
+    if(!alive||!s)return;last=s;
+    select.value=s.mode;
+    const busy=running||['checking','installing'].includes(s.state);
+    select.disabled=check.disabled=busy||['unavailable','restart'].includes(s.state);
+    install.disabled=busy||!s.version||!['available','error'].includes(s.state);
+    install.style.display=s.version&&['available','error'].includes(s.state)?'':'none';
+    const labels={
+      idle:tr('Not checked yet','Проверка ещё не выполнена'),
+      checking:tr('Checking…','Проверка…'),
+      current:tr('Up to date','Установлена актуальная версия'),
+      available:tr('Available: ','Доступна версия: ')+s.version,
+      installing:tr('Installing…','Установка…'),
+      restart:tr('Restart OpenCode to activate ','Перезапусти OpenCode для активации ')+s.version,
+      error:tr('Update failed. Retry or use the portable ZIP.','Ошибка обновления. Повтори попытку или используй ZIP.'),
+      unavailable:tr('Use the portable installer for this installation.','Для этой установки используй ZIP-установщик.')
+    };
+    line.textContent=labels[s.state]||labels.idle;
+    summary.textContent=s.state==='available'?tr('Update available: ','Доступно обновление: ')+s.version:s.state==='restart'?tr('Restart required','Требуется перезапуск'):tr('Updates','Обновления');
+    summary.style.color=['available','restart'].includes(s.state)?palette.success:palette.muted;
+  }
+  async function request(fn){
+    if(!alive||running)return;
+    running=true;if(last)paint(last);
+    try{const value=await fn();if(alive)paint(value);}
+    catch{if(alive)paint({...last,mode:last?.mode||'notify',state:'error',version:null});}
+    finally{running=false;if(last)paint(last);}
+  }
+  check.addEventListener('click',()=>void request(()=>client.check({})));
+  install.addEventListener('click',()=>void request(()=>client.install({})));
+  select.addEventListener('change',()=>void request(()=>client.setMode({mode:select.value})));
+  const refresh=()=>void request(()=>client.get({}));
+  refresh();const timer=setInterval(refresh,3000);
+  return ()=>{alive=false;clearInterval(timer);};
+}
 function renderPopupFooter(ctx,root){
   // Keep the footer outside the refreshed account body and use build metadata.
   const copyright=pluginMetadata.copyright.replace(/^Copyright \(c\) /i,'© ');
@@ -695,6 +753,7 @@ function createView(ctx,client,{compact=false}={}) {
   refresh.type='button';refresh.setAttribute('aria-label',t(ctx,'usage.retry'));refresh.title=t(ctx,'usage.retry');
   const body=add(root,$('div'));
   if(compact)renderPopupFooter(ctx,root);
+  const stopUpdates=compact?renderUpdateControls(ctx,root.lastChild):()=>{};
   let alive=true,running=false,hasData=false,lastSnapshot=null,lastServerSnapshot=null,queuedRefresh=false,coldRefreshRequested=false,switchSequence=0,commitVersion=0;
   const stableOrder=stableAccountOrder;
   const desiredByProvider=new Map();
@@ -843,7 +902,7 @@ function createView(ctx,client,{compact=false}={}) {
   }
   refresh.addEventListener('click',()=>void load(true));
   const timer=setInterval(()=>void load(false),5000);
-  const destroy=()=>{alive=false;clearInterval(timer);disposeState();};
+  const destroy=()=>{alive=false;clearInterval(timer);stopUpdates();disposeState();};
   if(!compact)onCleanup(destroy);
   void load();
   return {root,load,destroy};
@@ -1145,6 +1204,11 @@ exports.default=Plugin.define({
       settings=JSON.parse(fs.readFileSync(path.join(pluginFolder,'settings.json'),'utf8'));
     } catch { /* defaults: optional configuration file missing or corrupt */ }
     const refreshMinutes=cache.readInterval(settings?.refreshMinutes,5);
+    const configuredRoot=env.OPENCODE_CONFIG_DIR&&path.isAbsolute(env.OPENCODE_CONFIG_DIR)?env.OPENCODE_CONFIG_DIR:path.join(os.homedir(),'.config','opencode');
+    const portableFolder=path.join(configuredRoot,'plugins','usage-dashboard');
+    const updater=autoUpdate.createUpdater({folder:pluginFolder===portableFolder?pluginFolder:null,current:pluginMetadata.version});
+    ctx.provide(Updates,{state:updater.status,get:updater.status,check:updater.check,install:updater.install,setMode:({mode})=>updater.setMode(mode)});
+    updater.start();
     const monitor=core.makeDashboardMonitor({client:()=>ctx.client,
       endpoint:()=>ctx.serverEndpoints?.get('sidecar')});
     let published=cache.EMPTY();
@@ -1190,6 +1254,6 @@ exports.default=Plugin.define({
     };
     const activeTimer=setInterval(()=>void sync(),20000);activeTimer.unref?.();
     void sync();
-    return ()=>{clearInterval(activeTimer);store.stop();};
+    return ()=>{clearInterval(activeTimer);updater.stop();store.stop();};
   },
 });

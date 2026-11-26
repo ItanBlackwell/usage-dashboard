@@ -39,6 +39,25 @@ jobs:
           diff -u <(sed '/^ \* Source-Revision:/d' "$RUNNER_TEMP/committed-bundle.cjs") <(sed '/^ \* Source-Revision:/d' dist/gui-experimental.cjs)
           node --check dist/gui-experimental.cjs
           node -e 'const p=require("./package.json");if(p.name!=="usage-dashboard"||!p.exports?.["./gui-experimental"])process.exit(1)'
+      - name: Verify updater release and checksum validation
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert=require('node:assert/strict');
+          const u=require('./src/auto-update.cjs');
+          assert.equal(u.newer('0.15.0','0.14.1'),true);
+          assert.equal(u.newer('0.14.1','0.14.1'),false);
+          assert.equal(u.newer('0.15.0-rc.1','0.14.1'),false);
+          assert.equal(u.newer('0.9.0','0.14.1'),false);
+          assert.equal(u.allowedUrl('https://evil.example/a'),false);
+          assert.equal(u.allowedUrl('https://github.com/other/repo/releases/download/v1/x'),false);
+          const name='Usage-Dashboard-Portable-0.15.0.zip',hash='a'.repeat(64);
+          assert.equal(u.checksumFor(hash+'  '+name+'\n',name),hash);
+          assert.throws(()=>u.checksumFor(hash+'  '+name+'\n'+hash+'  '+name,name));
+          assert.equal(u.selectRelease({draft:false,prerelease:true,tag_name:'v0.15.0'},'0.14.1'),null);
+          assert.throws(()=>u.selectRelease({draft:false,prerelease:false,tag_name:'v0.15.0',assets:[]},'0.14.1'));
+          assert.throws(()=>u.readPortable(Buffer.alloc(22),'0.15.0'));
+          NODE
       - name: Verify balance presentation and IPC fallback
         shell: bash
         run: |
@@ -493,13 +512,26 @@ jobs:
             let rows=codex.advanceCodexUsage([],[account('a',now,10),account('b',now,20)],null,now);
             rows=codex.advanceCodexUsage(rows,[account('a',now+1000,12),account('b',now+1000,20)],null,now+1000);
             assert.equal(rows[0].weekly.daily[0].amount,2);assert.equal(rows[1].weekly.daily[0].amount,0);
+            const weekOnly=chart.seriesFor({accounts:[account('a',now+1000,12)],codexUsage:rows},{kind:'quota',id:'openai:a'},now+1000);
+            assert.deepEqual(weekOnly.series.map(s=>s.key),['weekly']);
+            const weekly=(at,used,reset)=>account('weekly-only',at,used,{windows:[{label:'Weekly',usedPercent:used,remainingPercent:100-used,resetsAt:reset}]});
+            const reset=now+6*day, sample=weekly(now,0,reset);
+            let shifted=codex.advanceCodexUsage([],[sample],null,now);
+            shifted=codex.advanceCodexUsage(shifted,[weekly(now+300000,3,reset+300000)],null,now+300000);
+            assert.equal(shifted[0].weekly.today.amount,3);
+            shifted=codex.advanceCodexUsage(shifted,[weekly(now+600000,5,reset+330000)],null,now+600000);
+            assert.equal(shifted[0].weekly.today.amount,5);
+            shifted=codex.advanceCodexUsage(shifted,[weekly(now+900000,5,reset+330000)],null,now+900000);
+            assert.equal(shifted[0].weekly.today.amount,5);
+            shifted=codex.advanceCodexUsage(shifted,[weekly(now+1200000,8,reset+day)],null,now+1200000);
+            assert.equal(shifted[0].weekly.today.amount,5);
             const legacy=JSON.parse(JSON.stringify(rows));delete legacy[0].weekly.daily;
             assert.equal(codex.cleanCodexUsage(legacy,[account('a',now,10)])[0].weekly.daily[0].amount,2);
             rows=codex.advanceCodexUsage(rows,[account('a',now+day,15),account('b',now+day,24)],null,now+day);
             assert.equal(rows[0].weekly.today,null);assert.equal(rows[0].weekly.daily.length,1);
             rows=codex.advanceCodexUsage(rows,[account('a',now+day+1000,19)],null,now+day+1000);
             assert.deepEqual(rows[0].weekly.daily.map(x=>x.amount),[2,4]);assert.equal(rows[0].weekly.month.amount,9);
-            assert.deepEqual(chart.seriesFor({codexUsage:rows},{kind:'quota',id:'openai:a'},now+day+1000).series[1].values,[null,null,null,null,null,2,4]);
+            assert.deepEqual(chart.seriesFor({codexUsage:rows},{kind:'quota',id:'openai:a'},now+day+1000).series.find(s=>s.key==='weekly').values,[null,null,null,null,null,2,4]);
             rows=codex.advanceCodexUsage(rows,[account('a',now+8*day,20)],null,now+8*day);
             assert.equal(rows[0].weekly.daily.length,0);
             const a={from:dates[0],to:dates[0]+1000,amount:0},b={from:dates[2],to:dates[2]+1000,amount:132};
