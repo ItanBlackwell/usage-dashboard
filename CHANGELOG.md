@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.2
+
 - Add opt-in automatic installation and default update notifications for Windows portable installations, with SHA-256 verification, bounded downloads and rollback on replacement errors.
 
 - Account for weekly reset timestamp drift and the initial transition from an
