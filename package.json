@@ -1,6 +1,6 @@
 {
   "name": "usage-dashboard",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "private": true,
   "description": "OpenCode Desktop plugin for monitoring provider quota windows and API balance, with account switching",
   "type": "commonjs",
