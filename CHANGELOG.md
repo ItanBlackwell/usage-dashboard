@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Account for weekly reset timestamp drift and the initial transition from an
+  observed unused weekly quota to its first positive reading. Distinguish
+  current-window usage from recorded daily increases; keep ambiguous intervals
+  and unobserved history out of the estimates.
+
+- Show only available quota series in the weekly chart, retaining recent
+  observed history and explaining empty quota charts without inventing usage.
+
 ## 0.14.1
 
 - Add a small version and copyright footer at the bottom of the usage popup,

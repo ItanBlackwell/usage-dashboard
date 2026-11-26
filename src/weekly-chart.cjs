@@ -25,7 +25,14 @@ function seriesFor(snapshot,target,now){
         return valid(v?.amount)?v.amount:null;
       })};
     });
-    return {days,series};
+    // A missing quota is not a zero-valued series. Preserve recent history
+    // when a window disappears or a provider read temporarily fails.
+    const account=snapshot?.accounts?.find(a=>a.id===target.id);
+    const labels={fiveHour:'5-hour',weekly:'Weekly'};
+    const supported=series.filter(s=>(account?.windows||[]).some(w=>w.label===labels[s.key])
+      ||s.values.some(valid));
+    const observed=series.filter(s=>row?.[s.key]?.baseline);
+    return {days,series:supported.length?supported:observed.length?observed:series};
   }
   const history=snapshot?.localWeek;
   const past=Number.isSafeInteger(history?.checkedAt)&&history.checkedAt<=now?history.days||[]:[];
@@ -91,11 +98,14 @@ function render(parent,snapshot,accounts,providers,{document:doc,palette,tr,prov
     const target=targets.find(t=>t.key===select.value)||initial;
     state.key=target.key;
     const {days,series}=seriesFor(snapshot,target,now),quota=target.kind==='quota';
-    const styles=quota?[
-      {label:tr('5 hours','5 часов'),color:palette.success},
-      {label:tr('Weekly quota','Недельный лимит'),color:palette.fiveHour}
-    ]:[{label:tr('Local cost','Локальная оценка'),color:palette.fiveHour}];
+    const quotaStyles={
+      fiveHour:{label:tr('5 hours','5 часов'),color:palette.success},
+      weekly:{label:tr('Weekly quota','Недельный лимит'),color:palette.fiveHour}
+    };
+    const styles=series.map(s=>quota?quotaStyles[s.key]:{label:tr('Local cost','Локальная оценка'),color:palette.fiveHour});
     const format=v=>!valid(v)?'—':quota?'≈ '+fmt.format(v)+' '+tr('pp','п.п.'):'≈ '+formatSpend(v,'USD');
+    const account=quota?snapshot?.accounts?.find(a=>a.id===target.id):null;
+    const labels={fiveHour:'5-hour',weekly:'Weekly'};
     const summary=add(content,node('div','display:grid;grid-template-columns:repeat('+series.length+',minmax(0,1fr));gap:5px'));
     series.forEach((s,i)=>{
       const total=summarize(s.values),tile=add(summary,node('div','min-width:0;padding:5px 6px;border-radius:5px;background:rgba(125,135,155,.075)'));
@@ -104,7 +114,26 @@ function render(parent,snapshot,accounts,providers,{document:doc,palette,tr,prov
       add(legend,node('span','overflow:hidden;text-overflow:ellipsis;white-space:nowrap',styles[i].label));
       add(tile,node('strong','display:block;margin-top:2px;font-size:12px;font-variant-numeric:tabular-nums;color:'+styles[i].color,format(total.amount)));
       add(tile,node('div',muted,total.count===7?tr('7 days observed','7 дней наблюдений'):tr('Days with data: ','Дней с данными: ')+total.count+'/7'));
+      if(quota&&account?.state==='ok'&&!snapshot?.inventoryWarning){
+        const current=(account.windows||[]).find(w=>w.label===labels[s.key]);
+        if(valid(current?.usedPercent)&&current.usedPercent<=100){
+          add(tile,node('div',muted,tr('Current window used: ','Израсходовано в текущем лимите: ')+fmt.format(current.usedPercent)+'%'));
+        }
+      }
     });
+    if(quota&&!series.some(s=>s.values.some(valid))){
+      const comparable=(account?.windows||[]).some(w=>series.some(s=>labels[s.key]===w.label)
+        &&Number.isSafeInteger(w.resetsAt)&&w.resetsAt>account.checkedAt);
+      const note=snapshot?.inventoryWarning||account?.state!=='ok'?
+        tr('Current quota observation unavailable.','Текущий замер квоты недоступен.'):
+        !comparable?
+          tr('Quota reset time is unknown or expired.','Время сброса квоты неизвестно или истекло.'):
+          tr('Waiting for comparable quota readings. The first reading is a baseline.','Ожидание сопоставимых замеров квоты. Первый замер служит точкой отсчёта.');
+      add(content,node('div',muted+';margin-top:5px',note));
+    }
+    if(quota&&series.some(s=>summarize(s.values).amount===0)){
+      add(content,node('div',muted+';margin-top:5px',tr('Zero means no recorded increase in comparable readings, not necessarily no activity. Provider percentages may be rounded.','Ноль означает отсутствие зафиксированного прироста между сопоставимыми замерами, а не отсутствие активности. Проценты провайдера могут округляться.')));
+    }
     const svg=svgNode('svg',{viewBox:'0 0 320 144',width:'100%',role:'group','aria-label':tr('Daily usage line chart','Линейный график расхода по дням')},content);
     svg.style.cssText='display:block;margin-top:6px;overflow:visible;font-family:inherit';
     const left=42,right=308,top=17,bottom=110,step=axisStep(series,quota),maximum=3*step;
