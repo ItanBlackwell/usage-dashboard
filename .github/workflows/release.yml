@@ -8,24 +8,62 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (must match package.json, without v)'
+        required: true
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-publication
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Validate release ref and requested version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'require("./package.json").version')
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$GITHUB_REF" = refs/heads/main
+            test "$REQUESTED_VERSION" = "$VERSION"
+          else
+            test "$GITHUB_REF" = "refs/tags/v$VERSION"
+          fi
+          grep -Fxq "# Usage Dashboard $VERSION" RELEASE_NOTES.md
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   validate:
+    needs: [preflight]
     uses: ./.github/workflows/ci.yml
 
   secrets:
+    needs: [preflight]
     uses: ./.github/workflows/secret-scan.yml
 
   package:
-    needs: [validate, secrets]
-    if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    needs: [preflight, validate, secrets]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -81,7 +119,7 @@ jobs:
           subject-path: release/*.zip
 
   publish:
-    needs: [attest]
+    needs: [preflight, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release
@@ -100,17 +138,35 @@ jobs:
           path: release
       - name: Verify checksums
         run: (cd release && sha256sum -c SHA256SUMS.txt)
+      - name: Setup Node for publication
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           VERSION=$(node -p 'require("./package.json").version')
           TAG="v${VERSION}"
+          test "$VERSION" = "$EXPECTED_VERSION"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$GITHUB_REF" = refs/heads/main
+          else
+            test "$GITHUB_REF" = "refs/tags/$TAG"
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG is already published. No changes were made."
             exit 0
+          fi
+          # Never move an existing tag. A tag must resolve to this exact checked commit.
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$GITHUB_SHA"
+          else
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
           fi
           gh release create "$TAG" \
             "release/Usage-Dashboard-Portable-${VERSION}.zip" \
