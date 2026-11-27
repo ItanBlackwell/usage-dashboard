@@ -13,6 +13,7 @@ try {
         return
     }
     $root=Get-OpenCodeRoot
+    if (!$ApplyQueued -and (Test-Path -LiteralPath (Join-Path $root '.usage-dashboard-pending'))) { throw 'An operation is already queued. Run Apply.cmd first.' }
     $plugin=Join-Path $root 'plugins\usage-dashboard'
     $saved=Join-Path $root '.usage-dashboard-userdata'
     Assert-NoReparsePath -Path $plugin
