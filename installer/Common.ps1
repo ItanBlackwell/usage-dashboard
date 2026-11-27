@@ -176,3 +176,35 @@ function Assert-NoReparseTree {
         }
     }
 }
+
+function Test-UsageOpenCodeRunning {
+    return [bool](Get-Process -ErrorAction SilentlyContinue | Where-Object {$_.ProcessName -match 'opencode'} | Select-Object -First 1)
+}
+function Queue-UsageOperation {
+    param([string]$Action,[string]$PackageRoot,[bool]$Purge=$false)
+    $root=Get-OpenCodeRoot
+    $queue=Join-Path $root '.usage-dashboard-pending'
+    Assert-NoReparsePath -Path $queue
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    New-Item -ItemType Directory -Path $queue -ErrorAction Stop | Out-Null
+    try{
+        foreach($file in @('Common.ps1','Deferred.ps1','Install-UsageDashboard.ps1','Uninstall-UsageDashboard.ps1')){
+            $src=Join-Path $PSScriptRoot $file
+            Assert-NoReparsePath -Path $src
+            Copy-Item -LiteralPath $src -Destination (Join-Path $queue $file)
+        }
+        if($Action -eq 'install'){
+            $payload=Join-Path $queue 'payload'
+            foreach($file in @('package.json','dist\gui-experimental.cjs','installer\Common.ps1','installer\Deferred.ps1')){
+                $src=Join-Path $PackageRoot $file
+                Assert-NoReparsePath -Path $src
+                $dest=Join-Path $payload $file
+                New-Item -ItemType Directory -Force -Path (Split-Path $dest)|Out-Null
+                Copy-Item -LiteralPath $src -Destination $dest
+            }
+        }
+        [IO.File]::WriteAllText((Join-Path $queue 'operation.json'),(@{action=$Action;purge=$Purge}|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+        Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"' +(Join-Path $queue 'Deferred.ps1')+ '"')) -WindowStyle Hidden
+        Write-Host 'Operation queued; OpenCode will not be stopped.'
+    }catch{Write-Warning "Pending operation retained at $queue; inspect before retrying.";throw}
+}
