@@ -26,13 +26,13 @@ try{
       & (Join-Path $queue 'Uninstall-UsageDashboard.ps1') -PurgeCachedData:([bool]$state.purge) -ApplyQueued
       if(!$? -or $LASTEXITCODE){throw 'Removal failed'}
     }
-    'update' {
+    {$_ -in @('update','rollback')} {
       $target=Join-Path (Get-OpenCodeRoot) 'plugins\usage-dashboard'
       Assert-NoReparseTree -Path $target
       $manifest=Join-Path $target 'package.json'
       $current=Get-Content -LiteralPath $manifest -Raw|ConvertFrom-Json
       $next=Get-Content -LiteralPath (Join-Path $queue 'payload\package.json') -Raw|ConvertFrom-Json
-      if($current.name -ne 'usage-dashboard' -or $next.name -ne 'usage-dashboard' -or $current.version -ne $state.current -or $next.version -ne $state.next -or [version]$next.version -le [version]$current.version){throw 'Version changed or invalid'}
+      if($current.name -ne 'usage-dashboard' -or $next.name -ne 'usage-dashboard' -or $current.version -ne $state.current -or $next.version -ne $state.next -or ($state.action -eq 'update' -and [version]$next.version -le [version]$current.version)){throw 'Version changed or invalid'}
       $backup=Join-Path (Get-OpenCodeRoot) ('.usage-dashboard-backup-'+[Guid]::NewGuid().ToString('N'))
       New-Item -ItemType Directory -Path (Join-Path $backup 'dist')|Out-Null
       $files=@('package.json','dist\gui-experimental.cjs')
