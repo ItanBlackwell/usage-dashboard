@@ -22,6 +22,7 @@ try {
         return
     }
     $root=Get-OpenCodeRoot
+    if (!$ApplyQueued -and (Test-Path -LiteralPath (Join-Path $root '.usage-dashboard-pending'))) { throw 'An operation is already queued. Run Apply.cmd first.' }
     $plugins=Join-Path $root 'plugins'
     $target=Join-Path $plugins 'usage-dashboard'
     $old=Join-Path $plugins 'pv-usage-dashboard'
@@ -46,6 +47,15 @@ try {
     # Restore settings from a prior clean uninstall when no current settings exist.
     $saved=Join-Path $root '.usage-dashboard-userdata'
     & $copySafe (Join-Path $saved 'settings.json') (Join-Path $target 'settings.json')
+    if (Confirm-PluginIdentity -Directory $target -Expected 'usage-dashboard') {
+        $backup=Join-Path $root ('.usage-dashboard-backup-'+[Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $backup 'dist') | Out-Null
+        foreach ($relative in @('package.json','dist\gui-experimental.cjs')) {
+            $src=Join-Path $target $relative
+            Assert-NoReparsePath -Path $src
+            Copy-Item -LiteralPath $src -Destination (Join-Path $backup $relative)
+        }
+    }
     Copy-Item -LiteralPath $manifest -Destination (Join-Path $target 'package.json') -Force
     Copy-Item -LiteralPath $bundle -Destination (Join-Path $target 'dist\gui-experimental.cjs') -Force
     foreach ($name in @('Common.ps1','Deferred.ps1')) {
