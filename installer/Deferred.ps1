@@ -16,6 +16,7 @@ try{
   }
   $state=Get-Content -LiteralPath (Join-Path $queue 'operation.json') -Raw|ConvertFrom-Json
   if(Test-UsageOpenCodeRunning){throw 'OpenCode restarted before activation; retry the worker.'}
+  $global:LASTEXITCODE=0
   switch($state.action){
     'install' {
       & (Join-Path $queue 'Install-UsageDashboard.ps1') -PackageRoot (Join-Path $queue 'payload') -ApplyQueued
