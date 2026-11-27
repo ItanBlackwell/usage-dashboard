@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Source: https://github.com/ItanBlackwell/usage-dashboard
 [CmdletBinding()]
-param([string]$PackageRoot)
+param([string]$PackageRoot,[switch]$ApplyQueued)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 try {
@@ -16,7 +16,13 @@ try {
     }
     $package=Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
     if ($package.name -ne 'usage-dashboard') { throw 'Wrong plugin package: expected usage-dashboard.' }
+    if (Test-UsageOpenCodeRunning) {
+        if ($ApplyQueued) { throw 'OpenCode is running; retry later.' }
+        Queue-UsageOperation -Action install -PackageRoot $PackageRoot
+        return
+    }
     $root=Get-OpenCodeRoot
+    if (!$ApplyQueued -and (Test-Path -LiteralPath (Join-Path $root '.usage-dashboard-pending'))) { throw 'An operation is already queued. Run Apply.cmd first.' }
     $plugins=Join-Path $root 'plugins'
     $target=Join-Path $plugins 'usage-dashboard'
     $old=Join-Path $plugins 'pv-usage-dashboard'
@@ -41,8 +47,25 @@ try {
     # Restore settings from a prior clean uninstall when no current settings exist.
     $saved=Join-Path $root '.usage-dashboard-userdata'
     & $copySafe (Join-Path $saved 'settings.json') (Join-Path $target 'settings.json')
+    if (Confirm-PluginIdentity -Directory $target -Expected 'usage-dashboard') {
+        $backup=Join-Path $root ('.usage-dashboard-backup-'+[Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $backup 'dist') | Out-Null
+        foreach ($relative in @('package.json','dist\gui-experimental.cjs')) {
+            $src=Join-Path $target $relative
+            Assert-NoReparsePath -Path $src
+            Copy-Item -LiteralPath $src -Destination (Join-Path $backup $relative)
+        }
+    }
     Copy-Item -LiteralPath $manifest -Destination (Join-Path $target 'package.json') -Force
     Copy-Item -LiteralPath $bundle -Destination (Join-Path $target 'dist\gui-experimental.cjs') -Force
+    foreach ($name in @('Common.ps1','Deferred.ps1')) {
+        $src=Join-Path $PackageRoot "installer\$name"
+        $dst=Join-Path $target "installer\$name"
+        Assert-NoReparsePath -Path $src
+        Assert-NoReparsePath -Path $dst
+        New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+    }
     Remove-RetiredBillingRuntime -Directory $target
     Remove-LegacyBillingCompanion -Directory $target
     Remove-LegacyBillingCompanion -Directory $saved

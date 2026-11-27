@@ -123,35 +123,30 @@ function atomicWrite(fs,path,target,data){
   finally{try{fs.unlinkSync(temporary);}catch(e){if(e.code!=='ENOENT')throw e;}}
 }
 function installFiles(folder,current,next,files){
-  const fs=require('node:fs'),path=require('node:path');
-  const lock=path.join(folder,'.update-lock'),backup=path.join(folder,'.update-backup');
-  safePath(fs,path,lock);fs.mkdirSync(lock);
-  let keepLock=false;const changed=[];
+  const fs=require('node:fs'),path=require('node:path'),child=require('node:child_process');
+  const root=path.dirname(path.dirname(folder));
+  const queue=path.join(root,'.usage-dashboard-pending');
+  const manifest=path.join(folder,'package.json');
+  safePath(fs,path,manifest);
+  const installed=JSON.parse(fs.readFileSync(manifest,'utf8'));
+  if(installed.name!=='usage-dashboard'||installed.version!==current||!newer(next,current))throw Error('installed_version_changed');
+  const helper=path.join(folder,'installer','Deferred.ps1');
+  const common=path.join(folder,'installer','Common.ps1');
+  for(const file of [helper,common]){safePath(fs,path,file);if(!fs.lstatSync(file).isFile())throw Error('manual_reinstall_required');}
+  safePath(fs,path,queue);fs.mkdirSync(queue);
   try{
-    const manifest=path.join(folder,'package.json');
-    safePath(fs,path,manifest);
-    const installed=JSON.parse(fs.readFileSync(manifest,'utf8'));
-    if(installed.name!=='usage-dashboard'||installed.version!==current||!newer(next,current))throw Error('installed_version_changed');
-    safePath(fs,path,backup);fs.mkdirSync(backup,{recursive:true});
+    for(const [src,name] of [[helper,'Deferred.ps1'],[common,'Common.ps1']])fs.copyFileSync(src,path.join(queue,name),fs.constants.COPYFILE_EXCL);
     for(const relative of FILES){
-      const target=path.join(folder,relative),saved=path.join(backup,path.basename(relative));
-      safePath(fs,path,target);safePath(fs,path,saved);
-      if(!fs.lstatSync(target).isFile())throw Error('invalid_installation');
-      atomicWrite(fs,path,saved,fs.readFileSync(target));
+      const target=path.join(queue,'payload',relative);
+      fs.mkdirSync(path.dirname(target),{recursive:true});
+      fs.writeFileSync(target,files[relative],{flag:'wx',mode:0o600});
     }
-    try{
-      for(const relative of FILES){
-        atomicWrite(fs,path,path.join(folder,relative),files[relative]);changed.push(relative);
-      }
-    }catch(error){
-      for(const relative of changed.reverse()){
-        try{atomicWrite(fs,path,path.join(folder,relative),fs.readFileSync(path.join(backup,path.basename(relative))));}
-        catch{keepLock=true;}
-      }
-      if(keepLock)throw Error('rollback_failed');
-      throw error;
-    }
-  }finally{if(!keepLock)fs.rmdirSync(lock);}
+    fs.writeFileSync(path.join(queue,'operation.json'),JSON.stringify({action:'update',current,next}),{flag:'wx',mode:0o600});
+    const system=process.env.SystemRoot;
+    if(!system||!path.isAbsolute(system))throw Error('missing_windows_root');
+    const worker=child.spawn(path.join(system,'System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(queue,'Deferred.ps1')],{detached:true,windowsHide:true,stdio:'ignore',env:{...process.env,OPENCODE_CONFIG_DIR:root}});
+    worker.on('error',()=>{});worker.unref();
+  }catch(error){throw error;}
 }
 function createUpdater({folder,current,fetcher=globalThis.fetch,platform=process.platform}){
   const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
@@ -169,7 +164,7 @@ function createUpdater({folder,current,fetcher=globalThis.fetch,platform=process
     if(MODES.includes(options.updateMode))mode=options.updateMode;
     const manifest=path.join(folder,'package.json');safePath(fs,path,manifest);
     const installed=JSON.parse(fs.readFileSync(manifest,'utf8'));
-    if(installed.name!=='usage-dashboard'||installed.version!==current||fs.existsSync(path.join(folder,'.update-lock')))supported=false;
+    if(installed.name!=='usage-dashboard'||installed.version!==current||fs.existsSync(path.join(folder,'.update-lock'))||!fs.existsSync(path.join(folder,'installer','Deferred.ps1'))||!fs.existsSync(path.join(folder,'installer','Common.ps1')))supported=false;
   }catch{supported=false;}
   if(!supported)state='unavailable';
   const status=()=>({mode,state,version:installedVersion||release?.version||null,checkedAt});

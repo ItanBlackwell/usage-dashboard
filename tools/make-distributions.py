@@ -17,9 +17,9 @@ release.mkdir(exist_ok=True)
 
 portable_files = (
     'package.json', 'package-lock.json', 'dist/gui-experimental.cjs',
-    'installer/Common.ps1', 'installer/Install-UsageDashboard.ps1',
+    'installer/Common.ps1', 'installer/Deferred.ps1', 'installer/Apply.ps1', 'installer/Rollback.ps1', 'installer/Install-UsageDashboard.ps1',
     'installer/Uninstall-UsageDashboard.ps1',
-    'Install.cmd', 'Uninstall.cmd', 'README.md', 'LICENSE', 'NOTICE',
+    'Install.cmd', 'Uninstall.cmd', 'Apply.cmd', 'Rollback.cmd', 'README.md', 'LICENSE', 'NOTICE',
     'docs/INSTALLATION.md', 'docs/OPENCODE_BUDGETS.md', 'docs/PROVIDER_METRICS.md', 'usage-dashboard-preview.png',
 )
 def add_file(z, p, name):

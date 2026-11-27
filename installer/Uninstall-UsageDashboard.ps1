@@ -3,11 +3,17 @@
 # SPDX-License-Identifier: MPL-2.0
 # Source: https://github.com/ItanBlackwell/usage-dashboard
 [CmdletBinding()]
-param([switch]$PurgeCachedData)
+param([switch]$PurgeCachedData,[switch]$ApplyQueued)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 try {
+    if (Test-UsageOpenCodeRunning) {
+        if ($ApplyQueued) { throw 'OpenCode is running; retry later.' }
+        Queue-UsageOperation -Action uninstall -Purge ([bool]$PurgeCachedData)
+        return
+    }
     $root=Get-OpenCodeRoot
+    if (!$ApplyQueued -and (Test-Path -LiteralPath (Join-Path $root '.usage-dashboard-pending'))) { throw 'An operation is already queued. Run Apply.cmd first.' }
     $plugin=Join-Path $root 'plugins\usage-dashboard'
     $saved=Join-Path $root '.usage-dashboard-userdata'
     Assert-NoReparsePath -Path $plugin
