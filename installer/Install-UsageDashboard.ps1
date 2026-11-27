@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Source: https://github.com/ItanBlackwell/usage-dashboard
 [CmdletBinding()]
-param([string]$PackageRoot)
+param([string]$PackageRoot,[switch]$ApplyQueued)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 try {
@@ -16,6 +16,11 @@ try {
     }
     $package=Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
     if ($package.name -ne 'usage-dashboard') { throw 'Wrong plugin package: expected usage-dashboard.' }
+    if (Test-UsageOpenCodeRunning) {
+        if ($ApplyQueued) { throw 'OpenCode is running; retry later.' }
+        Queue-UsageOperation -Action install -PackageRoot $PackageRoot
+        return
+    }
     $root=Get-OpenCodeRoot
     $plugins=Join-Path $root 'plugins'
     $target=Join-Path $plugins 'usage-dashboard'
@@ -43,6 +48,14 @@ try {
     & $copySafe (Join-Path $saved 'settings.json') (Join-Path $target 'settings.json')
     Copy-Item -LiteralPath $manifest -Destination (Join-Path $target 'package.json') -Force
     Copy-Item -LiteralPath $bundle -Destination (Join-Path $target 'dist\gui-experimental.cjs') -Force
+    foreach ($name in @('Common.ps1','Deferred.ps1')) {
+        $src=Join-Path $PackageRoot "installer\$name"
+        $dst=Join-Path $target "installer\$name"
+        Assert-NoReparsePath -Path $src
+        Assert-NoReparsePath -Path $dst
+        New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+    }
     Remove-RetiredBillingRuntime -Directory $target
     Remove-LegacyBillingCompanion -Directory $target
     Remove-LegacyBillingCompanion -Directory $saved
